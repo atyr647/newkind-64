@@ -87,23 +87,30 @@ The title screen offers **A: Load Game** when a save exists.
 Game Settings > Graphics has three modes: **Enhanced** (the default), Solid
 and Wireframe. Enhanced draws the ships with the N64's 3D hardware through
 tiny3d: the original Elite ship shapes and face colours, lit from the
-system's sun and depth-buffered. Ships with a texture in `ships/` (so far the
-Cobra Mk III) are textured as well. Solid and Wireframe are the previous
+system's sun and depth-buffered. Solid and Wireframe are the previous
 software renderers, unchanged.
+
+Ships listed in `ships/` (so far the Cobra Mk III) use a new, more detailed
+textured model instead of the original geometry. It follows the original's
+overall shape and is scaled to exactly the same size, so it flies, collides
+and docks identically.
 
 An **Expansion Pak is required**.
 
-### Adding a ship texture
+### Adding a ship model
 
-Ship geometry is never replaced. A detailed reference model (for example one
-generated with Tripo) is projected onto the original shape as a 64x64,
-16-colour texture:
+Start from a detailed model with a texture (the Cobra's was generated with
+Tripo from a description of the original ship), saved as a GLB:
 
-    python3 tools/ship_export.py cobra3 render ref.png cobra3a_point   # reference picture
-    python3 tools/bake_ship_texture.py cobra3 reference.glb ships/cobra3 cobra3a_point
-    python3 tools/gen_ship_textures.py                                  # rewrites n64_shiptex.c
+    python3 tools/convert_ship_model.py cobra3 model.glb cobra3a_point 500
+    python3 tools/gen_ship_textures.py          # rewrites n64_shiptex.c
 
-then list the ship type in `SHIP_TYPES` in `tools/gen_ship_textures.py`.
+The converter reduces the model to about 500 triangles, makes it symmetric,
+trims thin probes, fits it to the original ship's bounding box, and bakes up
+to six small 16-colour textures (64x64 at most) that fit the N64's texture
+memory. List the game ship types that use it in `SHIP_TYPES` in
+`tools/gen_ship_textures.py`. `tools/ship_export.py` renders pictures of the
+original ships to describe or show to a model generator.
 
 ## How the N64 hardware is used
 

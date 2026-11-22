@@ -76,9 +76,24 @@ def main():
     # Optional 5th argument: a named view (the default is a 3/4 view).
     views = {"persp": (215, 28), "top": (180, 90), "bottom": (180, -90),
              "front": (180, 0), "back": (0, 0), "left": (90, 0), "right": (270, 0)}
-    yaw, pitch = [math.radians(a) for a in views[sys.argv[5] if len(sys.argv) > 5 else "persp"]]
+    yaw, pitch = [math.radians(a) for a in views.get(sys.argv[5] if len(sys.argv) > 5 else "persp", (0, 0))]
+
+    # "noseup" views look straight at the top/bottom/sides with the nose
+    # pointing up the picture (for flat ships, whose front view shows little).
+    basis = {"top_noseup": ((0, -1, 0), (0, 0, 1)), "bottom_noseup": ((0, 1, 0), (0, 0, 1)),
+             "left_noseup": ((1, 0, 0), (0, 0, 1)), "right_noseup": ((-1, 0, 0), (0, 0, 1))}
+    vname = sys.argv[5] if len(sys.argv) > 5 else "persp"
+
+    def cross(a, b):
+        return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
+
+    def dot(a, b):
+        return sum(x * y for x, y in zip(a, b))
 
     def view(p):
+        if vname in basis:
+            f, u = basis[vname]
+            return dot(p, cross(f, u)), dot(p, u), dot(p, f)
         x, y, z = p
         x, z = x * math.cos(yaw) + z * math.sin(yaw), -x * math.sin(yaw) + z * math.cos(yaw)
         y, z = y * math.cos(pitch) - z * math.sin(pitch), y * math.sin(pitch) + z * math.cos(pitch)

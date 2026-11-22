@@ -51,7 +51,9 @@ struct hw_model
 	int built;				/* 0 = not tried yet, 1 = ready, -1 = unusable */
 	int has_lines;			/* the model has 2-point "line" faces */
 	T3DVertPacked *verts;
-	sprite_t *texture;		/* NULL = flat face colours */
+	const struct ship_mesh *mesh;		/* replacement model, or NULL */
+	sprite_t **sprites;					/* its textures */
+	T3DVertPacked **mesh_verts;			/* its vertices, one buffer per batch */
 	int num_batches;
 	short batch_base[MAX_BATCHES];		/* first vertex of each batch (even) */
 	short batch_verts[MAX_BATCHES];		/* vertices to load (even) */
@@ -79,6 +81,7 @@ static struct vector light_dir = { -0.4, 0.6, -0.7 };
 
 
 static void build_model(int type);
+static void build_mesh_model(struct hw_model *model, const struct ship_mesh *mesh);
 
 void hw_ships_init(void)
 {
@@ -128,6 +131,60 @@ static int face_point(const struct ship_face *face, int n)
 
 
 /*
+ * Set up a replacement model: load its textures and pack its vertices
+ * into tiny3d's format, one buffer per batch.
+ */
+static void build_mesh_model(struct hw_model *model, const struct ship_mesh *mesh)
+{
+	int i, k;
+
+	model->sprites = calloc(mesh->num_charts, sizeof(sprite_t *));
+	model->mesh_verts = calloc(mesh->num_batches, sizeof(T3DVertPacked *));
+	if (!model->sprites || !model->mesh_verts)
+		return;
+
+	for (i = 0; i < mesh->num_charts; i++)
+	{
+		model->sprites[i] = sprite_load(mesh->sprite_files[i]);
+		if (!model->sprites[i])
+			return;
+	}
+
+	for (i = 0; i < mesh->num_batches; i++)
+	{
+		const struct ship_mesh_batch *b = &mesh->batches[i];
+		int pairs = (b->num_verts + 1) / 2;
+		T3DVertPacked *buf = malloc_uncached(sizeof(T3DVertPacked) * pairs);
+
+		if (!buf)
+			return;
+		memset(buf, 0, sizeof(T3DVertPacked) * pairs);
+
+		for (k = 0; k < b->num_verts; k++)
+		{
+			const short *v = &b->verts[k * 8];
+			int16_t *pos = t3d_vertbuffer_get_pos(buf, k);
+			int16_t *uv = t3d_vertbuffer_get_uv(buf, k);
+			T3DVec3 n = {{ v[3] / 127.0f, v[4] / 127.0f, v[5] / 127.0f }};
+
+			pos[0] = v[0];
+			pos[1] = v[1];
+			pos[2] = v[2];
+			uv[0] = v[6];
+			uv[1] = v[7];
+			*t3d_vertbuffer_get_norm(buf, k) = t3d_vert_pack_normal(&n);
+			*t3d_vertbuffer_get_color(buf, k) = 0xFFFFFFFF;
+		}
+
+		model->mesh_verts[i] = buf;
+	}
+
+	model->mesh = mesh;
+	model->built = 1;
+}
+
+
+/*
  * Build the vertex buffer and display list for one ship type.
  *
  * Every face gets its own vertices (so it can carry its own normal and
@@ -146,24 +203,22 @@ static void build_model(int type)
 	int batch_count;
 	int i, k;
 
-	const struct ship_texture *tex = NULL;
-
 	model->built = -1;
 
-	if (!ship || !solid->face_data || solid->num_faces <= 0)
-		return;
-
-	/* Is there a texture for this ship? */
-	for (i = 0; ship_textures[i].sprite_file; i++)
+	/* A replacement model takes precedence over the original geometry. */
+	for (i = 0; ship_meshes[i].num_batches; i++)
 	{
-		if (ship_textures[i].ship_type == type)
+		if (ship_meshes[i].ship_type == type)
 		{
-			model->texture = sprite_load(ship_textures[i].sprite_file);
-			if (model->texture)
-				tex = &ship_textures[i];
+			build_mesh_model(model, &ship_meshes[i]);
+			if (model->built == 1)
+				return;
 			break;
 		}
 	}
+
+	if (!ship || !solid->face_data || solid->num_faces <= 0)
+		return;
 
 	/* Worst case size: every face, plus one padding vertex per batch. */
 	for (i = 0; i < solid->num_faces; i++)
@@ -243,11 +298,7 @@ static void build_model(int type)
 			}
 			packed_normal = t3d_vert_pack_normal(&normal);
 
-			/* Textured ships take their colour from the texture. */
-			if (tex && i < tex->num_faces)
-				r = g = b = 255;
-			else
-				gfx_palette_rgb(face->colour, &r, &g, &b);
+			gfx_palette_rgb(face->colour, &r, &g, &b);
 			rgba = ((uint32_t)r << 24) | ((uint32_t)g << 16) | ((uint32_t)b << 8) | 0xFF;
 
 			face_batch[i] = batches;
@@ -263,12 +314,7 @@ static void build_model(int type)
 				pos[2] = p->z;
 				*t3d_vertbuffer_get_norm(model->verts, next) = packed_normal;
 				*t3d_vertbuffer_get_color(model->verts, next) = rgba;
-				if (tex && i < tex->num_faces)
-				{
-					int16_t *uv = t3d_vertbuffer_get_uv(model->verts, next);
-					uv[0] = tex->uv[i][k * 2];
-					uv[1] = tex->uv[i][k * 2 + 1];
-				}
+
 				next++;
 				batch_count++;
 			}
@@ -445,8 +491,8 @@ static void draw_model_lines(const struct hw_queued *q)
  */
 void hw_ships_flush(void)
 {
-	static const uint8_t ambient[4] = { 110, 110, 125, 255 };
-	static const uint8_t sunlight[4] = { 215, 210, 195, 255 };
+	static const uint8_t ambient[4] = { 140, 140, 150, 255 };
+	static const uint8_t sunlight[4] = { 200, 195, 180, 255 };
 	T3DVec3 dir;
 	int height = GFX_VIEW_BY + 1;
 	int i;
@@ -491,37 +537,51 @@ void hw_ships_flush(void)
 
 	for (i = 0; i < queued; i++)
 	{
-		if (models[queue[i].type].texture)
+		if (models[queue[i].type].mesh)
 			continue;
 		t3d_matrix_push(&matrices[i]);
 		draw_model(&models[queue[i].type]);
 		t3d_matrix_pop(1);
 	}
 
+	/* Ships with replacement models: textured, one texture per batch. */
 	{
 		sprite_t *current = NULL;
 
 		for (i = 0; i < queued; i++)
 		{
-			sprite_t *texture = models[queue[i].type].texture;
+			const struct hw_model *model = &models[queue[i].type];
+			int b, t;
 
-			if (!texture)
+			if (!model->mesh)
 				continue;
 
-			if (texture != current)
+			if (!current)
 			{
-				if (!current)
-				{
-					rdpq_mode_combiner(RDPQ_COMBINER_TEX_SHADE);
-					rdpq_mode_filter(FILTER_BILINEAR);
-					t3d_state_set_drawflags(T3D_FLAG_SHADED | T3D_FLAG_DEPTH | T3D_FLAG_TEXTURED);
-				}
-				rdpq_sprite_upload(TILE0, texture, NULL);
-				current = texture;
+				rdpq_mode_combiner(RDPQ_COMBINER_TEX_SHADE);
+				rdpq_mode_filter(FILTER_BILINEAR);
+				t3d_state_set_drawflags(T3D_FLAG_SHADED | T3D_FLAG_DEPTH | T3D_FLAG_TEXTURED);
 			}
 
 			t3d_matrix_push(&matrices[i]);
-			draw_model(&models[queue[i].type]);
+
+			for (b = 0; b < model->mesh->num_batches; b++)
+			{
+				const struct ship_mesh_batch *batch = &model->mesh->batches[b];
+				sprite_t *sprite = model->sprites[batch->chart];
+
+				if (sprite != current)
+				{
+					rdpq_sprite_upload(TILE0, sprite, NULL);
+					current = sprite;
+				}
+
+				t3d_vert_load(model->mesh_verts[b], 0, (batch->num_verts + 1) & ~1);
+				for (t = 0; t < batch->num_tris; t++)
+					t3d_tri_draw(batch->tris[t * 3], batch->tris[t * 3 + 1], batch->tris[t * 3 + 2]);
+				t3d_tri_sync();
+			}
+
 			t3d_matrix_pop(1);
 		}
 	}
@@ -532,7 +592,7 @@ void hw_ships_flush(void)
 	rdpq_set_scissor(0, 0, N64_SCREEN_W, N64_SCREEN_H);
 
 	for (i = 0; i < queued; i++)
-		if (models[queue[i].type].has_lines)
+		if (models[queue[i].type].has_lines && !models[queue[i].type].mesh)
 			draw_model_lines(&queue[i]);
 
 	queued = 0;
