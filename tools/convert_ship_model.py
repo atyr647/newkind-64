@@ -39,6 +39,10 @@ from ship_export import load_ship  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VERT_CACHE = 62          # vertices per batch (the RSP cache holds 70)
+TEXEL_DENSITY = 1.0      # wanted texels per game unit (the Cobra is 256 wide)
+TILE = 64                # texture tile size (64x64 at 16 colours fills TMEM)
+TILE_STEP = TILE - 2     # tiles overlap by a texel each side for filtering
+MAX_TILES = 3            # per chart, in each direction
 CREASE_DEGREES = 40.0    # edges sharper than this stay hard-edged
 
 
@@ -101,15 +105,37 @@ def orient(verts, faces, uv, image, target_lo, target_hi):
     return out, flipped
 
 
-def texture_size(w, h, area_share):
-    """Pick a texture size (powers of two, <= 64x64) for a chart."""
-    big = 64 if area_share > 0.08 else (32 if area_share > 0.01 else 16)
-    aspect = w / h
-    if aspect > 1.8:
-        return big, max(big // 2, 8)
-    if aspect < 0.55:
-        return max(big // 2, 8), big
-    return big, big
+def chart_texels(extent):
+    """
+    How many texels a chart gets along one side, and in how many tiles.
+    Small charts get one power-of-two texture; larger ones are covered by
+    several 64-texel tiles so the texture stays sharp.
+    """
+    want = extent * TEXEL_DENSITY
+    if want <= TILE:
+        size = 8
+        while size < want and size < TILE:
+            size *= 2
+        return size, 1
+    tiles = min(int(math.ceil(want / TILE_STEP)), MAX_TILES)
+    return tiles * TILE_STEP, tiles
+
+
+def clip_polygon(poly, axis, bound, keep_greater):
+    """Clip a polygon (list of (uv, pos, normal) corners) against a u or v line."""
+    out = []
+    n = len(poly)
+    for i in range(n):
+        cur, nxt = poly[i], poly[(i + 1) % n]
+        dc, dn = cur[0][axis] - bound, nxt[0][axis] - bound
+        ic = dc >= -1e-9 if keep_greater else dc <= 1e-9
+        inn = dn >= -1e-9 if keep_greater else dn <= 1e-9
+        if ic:
+            out.append(cur)
+        if ic != inn and abs(dc - dn) > 1e-12:
+            t = dc / (dc - dn)
+            out.append(tuple(c + (m - c) * t for c, m in zip(cur, nxt)))
+    return out
 
 
 def main():
@@ -180,7 +206,8 @@ def main():
     total_area = area.sum()
     proj_axes = {0: (2, 1), 1: (0, 2), 2: (0, 1)}
 
-    charts = []
+    charts = []          # every texture (tile) of every chart
+    chart_tiles = []     # per chart: its tiles and how many each way
     corner_uv = np.zeros((len(hf), 3, 2))
     face_chart = np.zeros(len(hf), int)
     for key in keys:
@@ -190,11 +217,11 @@ def main():
         amin, amax = used[:, a].min(), used[:, a].max()
         bmin, bmax = used[:, b].min(), used[:, b].max()
         w, h = max(amax - amin, 1e-3), max(bmax - bmin, 1e-3)
-        tw, th = texture_size(w, h, area[sel].sum() / total_area)
+        tw, tiles_u = chart_texels(w)
+        th, tiles_v = chart_texels(h)
         # Leave half a texel of border so bilinear filtering stays inside.
         su, sv = (tw - 1.0) / w, (th - 1.0) / h
-        cid = len(charts)
-        face_chart[sel] = cid
+        face_chart[sel] = len(chart_tiles)
         for i in sel:
             for k in range(3):
                 p = hv[hf[i][k]]
@@ -237,18 +264,69 @@ def main():
             if not covered.all():
                 idx = ndimage.distance_transform_edt(~covered, return_distances=False, return_indices=True)
                 tex = tex[idx[0], idx[1]]
-        name = "%s_%d" % (ship, cid)
-        img = Image.fromarray(np.clip(tex, 0, 255).astype(np.uint8), "RGB")
-        img.quantize(16, method=Image.MEDIANCUT, dither=Image.NONE).save(os.path.join(ROOT, "ships", name + ".png"))
-        charts.append({"file": name, "w": tw, "h": th})
+        # Cut the chart's picture into tiles, each its own texture.
+        tex = np.clip(tex, 0, 255).astype(np.uint8)
+        tiles = {}
+        for tv in range(tiles_v):
+            for tu in range(tiles_u):
+                if tiles_u == 1 and tiles_v == 1:
+                    ox, oy, piece = 0, 0, tex
+                else:
+                    # A tile shows TILE_STEP texels of its own plus a
+                    # one-texel border copied from its neighbours.
+                    ox = tu * TILE_STEP - 1 if tiles_u > 1 else 0
+                    oy = tv * TILE_STEP - 1 if tiles_v > 1 else 0
+                    pw = TILE if tiles_u > 1 else tw
+                    ph = TILE if tiles_v > 1 else th
+                    ys = np.clip(np.arange(oy, oy + ph), 0, th - 1)
+                    xs = np.clip(np.arange(ox, ox + pw), 0, tw - 1)
+                    piece = tex[np.ix_(ys, xs)]
+                name = "%s_%d" % (ship, len(charts))
+                Image.fromarray(piece, "RGB").quantize(16, method=Image.MEDIANCUT, dither=Image.NONE).save(
+                    os.path.join(ROOT, "ships", name + ".png"))
+                tiles[(tu, tv)] = (len(charts), ox, oy)
+                charts.append({"file": name, "w": piece.shape[1], "h": piece.shape[0]})
+        chart_tiles.append((tiles, tiles_u, tiles_v))
 
     # --- 4. mirror, and cut into batches that fit the vertex cache -------------
-    tris = []      # (chart, [3 x (x, y, z, nx, ny, nz, u, v)])
+    tris = []      # (texture, [3 x (x, y, z, nx, ny, nz, u, v)])
+
+    def emit(texture, poly, ox, oy):
+        # A convex polygon of (uv, pos, normal) corners -> triangle fan.
+        for k in range(1, len(poly) - 1):
+            corners = []
+            for uvc, p, n in (poly[0], poly[k], poly[k + 1]):
+                ln = np.linalg.norm(n)
+                n = n / ln if ln > 1e-9 else n
+                corners.append((p[0], p[1], p[2], n[0], n[1], n[2], uvc[0] - ox, uvc[1] - oy))
+            tris.append((texture, corners))
+            mirrored = [(-c[0], c[1], c[2], -c[3], c[4], c[5], c[6], c[7]) for c in corners]
+            tris.append((texture, mirrored[::-1]))
+
     for i, f in enumerate(hf):
-        corners = [tuple(hv[f[k]]) + tuple(corner_normal[i, k]) + tuple(corner_uv[i, k]) for k in range(3)]
-        tris.append((int(face_chart[i]), corners))
-        mirrored = [(-c[0], c[1], c[2], -c[3], c[4], c[5], c[6], c[7]) for c in corners]
-        tris.append((int(face_chart[i]), mirrored[::-1]))
+        tiles, tiles_u, tiles_v = chart_tiles[face_chart[i]]
+        poly = [(corner_uv[i, k].copy(), hv[f[k]].copy(), corner_normal[i, k].copy()) for k in range(3)]
+        for tu in range(tiles_u):
+            col = poly
+            if tiles_u > 1:
+                if tu > 0:
+                    col = clip_polygon(col, 0, tu * TILE_STEP, True)
+                if tu < tiles_u - 1:
+                    col = clip_polygon(col, 0, (tu + 1) * TILE_STEP, False)
+            if len(col) < 3:
+                continue
+            for tv in range(tiles_v):
+                cell = col
+                if tiles_v > 1:
+                    if tv > 0:
+                        cell = clip_polygon(cell, 1, tv * TILE_STEP, True)
+                    if tv < tiles_v - 1:
+                        cell = clip_polygon(cell, 1, (tv + 1) * TILE_STEP, False)
+                if len(cell) < 3:
+                    continue
+                texture, ox, oy = tiles[(tu, tv)]
+                emit(texture, cell, ox, oy)
+
     tris.sort(key=lambda t: t[0])
 
     def pack(c):
@@ -279,7 +357,7 @@ def main():
               open(os.path.join(ROOT, "ships", ship + ".mesh.json"), "w"))
     print("%s: %d triangles, %d vertices in %d batches, %d textures (%s)"
           % (ship, sum(len(b["tris"]) for b in batches), sum(len(b["verts"]) for b in batches),
-             len(batches), len(charts), ", ".join("%dx%d" % (c["w"], c["h"]) for c in charts)))
+             len(batches), len(charts), ", ".join("%dx%d" % (c["w"], c["h"]) for c in charts[:8]) + (" ..." if len(charts) > 8 else "")))
 
 
 if __name__ == "__main__":

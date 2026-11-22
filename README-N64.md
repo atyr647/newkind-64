@@ -106,9 +106,10 @@ Tripo from a description of the original ship), saved as a GLB:
     python3 tools/gen_ship_textures.py          # rewrites n64_shiptex.c
 
 The converter reduces the model to about 500 triangles, makes it symmetric,
-trims thin probes, fits it to the original ship's bounding box, and bakes up
-to six small 16-colour textures (64x64 at most) that fit the N64's texture
-memory. List the game ship types that use it in `SHIP_TYPES` in
+trims thin probes, fits it to the original ship's bounding box, and bakes
+its surface into 16-colour 64x64 textures (the most that fits the N64's
+texture memory at once). Large surfaces are covered by several of these
+tiles side by side - about one texel per game unit - so they stay sharp. List the game ship types that use it in `SHIP_TYPES` in
 `tools/gen_ship_textures.py`. `tools/ship_export.py` renders pictures of the
 original ships to describe or show to a model generator.
 
