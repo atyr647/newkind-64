@@ -36,10 +36,10 @@ from ship_export import load_ship, load_palette  # noqa: E402
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 VERT_CACHE = 62          # vertices per batch (the RSP cache holds 70)
-TEXEL_DENSITY = 1.0      # texels per game unit, when the face is small enough
+TEXEL_DENSITY = 1.5      # texels per game unit, when the face is small enough
 TILE = 64
 TILE_STEP = TILE - 2     # tiles overlap by a texel each side for filtering
-MAX_TILES = 2            # per face, in each direction
+MAX_TILES = 3            # per face, in each direction
 SUPERSAMPLE = 3          # paint at 3x and average down, for clean thin lines
 
 PANEL_W, PANEL_H = 30.0, 20.0   # plating size, in game units
@@ -103,6 +103,22 @@ class Layout:
         self.length = max(self.hi[2] - self.lo[2], 1.0)
         self.seed = seed
         self.cuts_x = self._cuts(0.0, self.half_width, seed, "x")
+
+        # The leading edge in plan view: for each distance from the centre
+        # line, how far forward the hull reaches (upper convex hull of the
+        # ship's points seen from above). Stripes follow it.
+        plan = sorted(set((abs(float(p[0])), float(p[2])) for p in pts))
+        hull = []
+        for q in sorted(plan, key=lambda t: (t[0], -t[1])):
+            while len(hull) >= 2:
+                (x1, z1), (x2, z2) = hull[-2], hull[-1]
+                if (x2 - x1) * (q[1] - z1) - (z2 - z1) * (q[0] - x1) >= 0:
+                    hull.pop()
+                else:
+                    break
+            hull.append(q)
+        self.front_x = np.array([h[0] for h in hull])
+        self.front_z = np.array([h[1] for h in hull])
         self.cuts_z = self._cuts(self.lo[2], self.hi[2], seed, "z")
 
     @staticmethod
@@ -113,6 +129,10 @@ class Layout:
             cuts.append(pos)
             k += 1
         return np.array(cuts)
+
+    def front(self, xa):
+        """How far forward the hull reaches at distance xa from the centre."""
+        return np.interp(xa, self.front_x, self.front_z)
 
     def table(self, tag, shape):
         """A repeatable table of random numbers, one per panel."""
@@ -155,6 +175,10 @@ def paint_face(base_rgb, pu, pv, poly, seed, is_engine, sym_u, world, normal, la
 
     col = np.broadcast_to(base, pu.shape + (3,)).copy()
     shade = np.ones(pu.shape)
+    glow = np.zeros(pu.shape)          # fraction of the way towards white
+    # Dark colours hide a darkening, so they get more of their detail from
+    # highlights instead.
+    dark = 1.0 - min(float(base.mean()) / 160.0, 1.0)
 
     # --- hull panels ----------------------------------------------------------
     if flat:
@@ -187,8 +211,9 @@ def paint_face(base_rgb, pu, pv, poly, seed, is_engine, sym_u, world, normal, la
     groove |= frame
     light |= (edge > 7.0 + SEAM) & (edge < 7.0 + SEAM * 2.4)
 
-    shade[light] *= 1.14
-    shade[groove] *= 0.48
+    shade[light] *= 1.10
+    glow[light] += 0.05 + 0.22 * dark
+    shade[groove] *= 0.48 + 0.12 * dark
 
     # an occasional access hatch: a darker inset rectangle with a handle
     kind = layout.table(("kind", tag), shape)[ia, ib]
@@ -204,25 +229,35 @@ def paint_face(base_rgb, pu, pv, poly, seed, is_engine, sym_u, world, normal, la
     # --- markings ---------------------------------------------------------------
     inner = edge > 3.0
     if top:
-        # cockpit canopy: dark glass across the nose, with glazing bars and a glint
-        canopy = (zn > 0.60) & (zn < 0.86) & (xn < 0.20) & inner
-        bars = canopy & ((np.abs((xa / 9.0) % 1.0 - 0.5) > 0.42) | (np.abs(zn - 0.73) < 0.012))
+        # cockpit canopy: tinted glass across the nose in a dark frame, one
+        # centre bar and one cross bar, with a sky reflection and a glint
+        canopy = (zn > 0.58) & (zn < 0.88) & (xn < 0.22) & inner
+        bars = canopy & ((xa < 1.3) | (np.abs(zn - 0.71) < 0.010))
         glass = canopy & ~bars
-        glint = glass & (np.abs((xa * 0.9 + wz) % 26.0 - 6.0) < 2.2)
-        col[glass] = (22, 34, 58)
-        col[glint] = (120, 160, 205)
-        col[bars] = np.clip(base * 0.55, 0, 255)
+        depth = np.clip((zn - 0.58) / 0.30, 0, 1)[..., None]
+        col[glass] = (np.array((95, 150, 190)) * (1 - depth) + np.array((20, 32, 60)) * depth)[glass]
+        glint = glass & (np.abs((xa * 1.2 + wz) % 34.0 - 8.0) < 2.0)
+        col[glint] = (205, 230, 245)
+        col[bars] = (48, 50, 58)
         shade[canopy] = 1.0
-        rim = (zn > 0.585) & (zn < 0.875) & (xn < 0.215) & inner & ~canopy
-        shade[rim] *= 0.55
+        rim = (zn > 0.565) & (zn < 0.895) & (xn < 0.235) & inner & ~canopy
+        col[rim] = (40, 42, 50)
+        shade[rim] = 1.0
 
-        # wing stripes and a roundel
-        stripe = inner & (((xn > 0.50) & (xn < 0.535)) | ((xn > 0.56) & (xn < 0.575))) & (zn < 0.62) & (zn > 0.10)
-        col[stripe] = (225, 225, 215)
-        r = np.hypot(xa - 0.34 * layout.half_width, (wz - (layout.lo[2] + 0.30 * layout.length)))
-        col[inner & (r < 8.5)] = (225, 225, 215)
-        col[inner & (r < 6.0)] = (190, 30, 30)
-        col[inner & (r < 2.6)] = (225, 225, 215)
+        # a bold stripe and a thin one following the wing's leading edge
+        behind = layout.front(xa) - wz
+        outboard = (xn > 0.28) & (xn < 0.93) & inner
+        stripe = outboard & (((behind > 7.0) & (behind < 13.0)) | ((behind > 16.0) & (behind < 18.0)))
+        col[stripe] = (228, 228, 218)
+        shade[stripe] = 1.0
+
+        # a roundel on each wing
+        r = np.hypot(xa - 0.60 * layout.half_width, wz - (layout.lo[2] + 0.30 * layout.length))
+        ring = inner & (r < 12.5)
+        col[ring] = (228, 228, 218)
+        col[inner & (r < 9.5)] = (200, 32, 32)
+        col[inner & (r < 4.0)] = (228, 228, 218)
+        shade[ring] = 1.0
 
     if bottom:
         # cargo bay doors on the belly
@@ -253,10 +288,46 @@ def paint_face(base_rgb, pu, pv, poly, seed, is_engine, sym_u, world, normal, la
     band = edge < TRIM                                         # bevelled edge
     shade[band] *= 0.76
     worn = (edge < 1.1)
-    shade[worn] *= 1.55 + 0.5 * (grain[worn] > 0.55)           # chipped, bright edges
+    shade[worn] *= 1.35                                        # chipped, bright edges
+    glow[worn] += 0.12 + 0.20 * dark + 0.10 * (grain[worn] > 0.55)
     shade[(edge >= TRIM) & (edge < TRIM + 0.9)] *= 0.62
 
-    return np.clip(col * shade[..., None], 0, 255)
+    out = np.clip(col * shade[..., None], 0, 255)
+    g = np.clip(glow, 0, 0.6)[..., None]
+    return out + (255.0 - out) * g
+
+
+def reduce_colours(img, count=16):
+    """
+    Reduce a tile to `count` colours. Median cut alone gives nearly every
+    colour to the large plain areas and merges small markings (a red-and-
+    white roundel on blue becomes olive), so the palette is seeded with
+    median cut plus the colours it fits worst, then refined by k-means.
+    """
+    px = img.reshape(-1, 3).astype(float)
+    uniq = np.unique(px, axis=0)
+    if len(uniq) <= count:
+        pal = uniq
+    else:
+        seed = np.asarray(Image.fromarray(img, "RGB").quantize(count - 4, method=Image.MEDIANCUT,
+                          dither=Image.NONE).getpalette()[:(count - 4) * 3], float).reshape(-1, 3)
+        pal = list(seed)
+        for _ in range(4):
+            d = ((px[:, None, :] - np.array(pal)[None]) ** 2).sum(-1).min(1)
+            pal.append(px[int(np.argmax(d))])
+        pal = np.array(pal)
+        for _ in range(10):
+            lab = ((px[:, None, :] - pal[None]) ** 2).sum(-1).argmin(1)
+            for k in range(len(pal)):
+                m = lab == k
+                if m.any():
+                    pal[k] = px[m].mean(0)
+    lab = ((px[:, None, :] - pal[None]) ** 2).sum(-1).argmin(1)
+    out = Image.new("P", (img.shape[1], img.shape[0]))
+    flat = [int(round(c)) for c in np.clip(pal, 0, 255).ravel()]
+    out.putpalette(flat + [0] * (768 - len(flat)))
+    out.putdata(lab.tolist())
+    return out
 
 
 def texel_layout(extent):
@@ -394,8 +465,7 @@ def main():
                     ys = np.clip(np.arange(oy, oy + ph), 0, th - 1)
                     xs_ = np.clip(np.arange(ox, ox + pw), 0, tw - 1)
                     fname = "%s_%d" % (ship, len(textures))
-                    Image.fromarray(img[np.ix_(ys, xs_)], "RGB").quantize(
-                        16, method=Image.MEDIANCUT, dither=Image.NONE).save(
+                    reduce_colours(img[np.ix_(ys, xs_)]).save(
                         os.path.join(ROOT, "ships", fname + ".png"))
                     tiles[(tu, tv)] = (len(textures), ox, oy)
                     textures.append({"file": fname, "w": pw, "h": ph})
