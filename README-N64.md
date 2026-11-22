@@ -93,7 +93,7 @@ software renderers, unchanged.
 Every hardware-drawn ship also has metal reflections: a second pass draws
 its triangles again with an environment texture (`env/env_metal.png`, made by
 `tools/make_env_texture.py`) mapped from the surface's direction as seen by the
-camera, blended over the paint, so highlights slide across the hull as it
+camera, blended over the paint, so a soft satin sheen slides across the hull as it
 turns (the N64's spherical environment mapping, done on the RSP).
 
 Ships listed in `ships/` (so far the Cobra Mk III) also get painted surface
