@@ -126,7 +126,56 @@ void snd_sound_shutdown(void)
 }
 
 
+static void snd_play_sample_only(int sample_no);
+
+/*
+ * Rumble Pak: a short kick when we take laser fire, a longer one for
+ * collisions and for losing the ship. Does nothing without a Rumble Pak.
+ */
+static int rumble_on;
+static long long rumble_until;
+
+static void rumble_pulse(int ms)
+{
+	long long until;
+
+	if (!joypad_get_rumble_supported(JOYPAD_PORT_1))
+		return;
+
+	until = timer_ticks() + TIMER_TICKS(ms * 1000LL);
+	if (!rumble_on || until > rumble_until)
+		rumble_until = until;
+	if (!rumble_on)
+	{
+		joypad_set_rumble_active(JOYPAD_PORT_1, true);
+		rumble_on = 1;
+	}
+}
+
+static void rumble_for_sample(int sample_no)
+{
+	switch (sample_no)
+	{
+		case SND_INCOMMING_FIRE_1:
+		case SND_INCOMMING_FIRE_2:
+			rumble_pulse(120);
+			break;
+		case SND_CRASH:
+			rumble_pulse(300);
+			break;
+		case SND_GAMEOVER:
+			rumble_pulse(900);
+			break;
+	}
+}
+
 void snd_play_sample(int sample_no)
+{
+	rumble_for_sample(sample_no);
+	snd_play_sample_only(sample_no);
+}
+
+static void snd_play_sample_only(int sample_no)
 {
 	int ch, i;
 	static int next_channel = 0;
@@ -205,6 +254,13 @@ void snd_tick_cooldowns(void)
  */
 void snd_update_sound(void)
 {
+	/* Switch the Rumble Pak off again when its pulse has run out. */
+	if (rumble_on && timer_ticks() >= rumble_until)
+	{
+		joypad_set_rumble_active(JOYPAD_PORT_1, false);
+		rumble_on = 0;
+	}
+
 	if (!sound_on)
 		return;
 

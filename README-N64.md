@@ -10,6 +10,8 @@ with a dashboard and icon bar rebuilt from the NES version of Elite.
   icon bar underneath (as on the NES, the dashboard is hidden).
 
 The icon bar changes with the situation: docked, in flight, or on a chart.
+Buttons that cannot be used right now (no E.C.M. fitted, no destination
+chosen, and so on) are shown blank.
 
 ## Controls
 
@@ -63,11 +65,32 @@ On a chart choose the **?** icon (or L+R+Z, or Find Planet in the pause menu).
 D-pad up/down picks a letter, right moves on to the next, A searches,
 B deletes a letter (or cancels when the name is empty).
 
+## Commander name
+
+While docked, the **AAA** button on the icon bar changes the commander's name
+(up to 7 letters, entered the same way as a planet name). It is saved with
+the commander.
+
+## Rumble Pak
+
+With a Rumble Pak in controller 1 you feel incoming laser fire, collisions
+and the loss of your ship.
+
 ## Saving
 
 One commander is kept in the cartridge EEPROM (Save Commander on the Options
 screen or in the pause menu, while docked). Game Settings are kept there too.
 The title screen offers **A: Load Game** when a save exists.
+
+## How the N64 hardware is used
+
+* The space views, title screens and cut-scenes are drawn straight into the
+  display buffer; only the static text screens go through a frame copy.
+* The RDP (graphics chip) wipes the view at the start of each frame while the
+  CPU reads the controller and runs the simulation, and fills the banded
+  planet as one textured rectangle per screen line.
+* Ships, stars, text and the dashboard are drawn by the CPU.
+* Sound effects and music are mixed by libdragon's RSP mixer.
 
 ## Building
 

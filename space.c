@@ -629,6 +629,7 @@ void update_universe (void)
 
 				if ((current_screen != SCR_INTRO_ONE) &&
 					(current_screen != SCR_INTRO_TWO) &&
+					(current_screen != SCR_MISSION) &&
 					(current_screen != SCR_GAME_OVER) &&
 					(current_screen != SCR_ESCAPE_POD))
 				{
@@ -1030,6 +1031,8 @@ static void draw_icon_bar (int y)
 {
 	extern int icon_bar_cursor;
 	extern int icon_bar_type;
+	extern int icon_slot_available (int slot);
+	int i;
 	int x1 = icon_bar_cursor * 40 + 18;
 	int x2 = x1 + 37;
 	int y1 = y + 1;
@@ -1037,6 +1040,9 @@ static void draw_icon_bar (int y)
 	int c = GFX_COL_NES_POINTER;
 
 	gfx_draw_icon_bar (icon_bar_type, y);
+	for (i = 0; i < 12; i++)
+		if (!icon_slot_available (i))
+			gfx_blank_icon (i, y);
 
 	gfx_draw_colour_line (x1, y1, x2, y1, c);
 	gfx_draw_colour_line (x1, y1 + 1, x2, y1 + 1, c);

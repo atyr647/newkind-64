@@ -83,10 +83,9 @@ int icon_bar_cursor = 0;
 int icon_bar_type = 0;      /* 0=docked, 1=flight, 2=charts */
 
 /* NES icon bar function numbers for each type (the NES iconBarButtons table).
- * 0 = no function. Button 7 of the docked bar (change commander name) has no
- * N64 equivalent. */
+ * 0 = no function. */
 static const int icon_funcs[3][12] = {
-	{  1, 2,  3,  4,  5,  6,  0, 35,  8,  0,  0, 12 },	/* docked */
+	{  1, 2,  3,  4,  5,  6,  7, 35,  8,  0,  0, 12 },	/* docked */
 	{ 17, 2,  3,  4, 21, 22, 23, 24, 25, 26, 27, 12 },	/* flight */
 	{  1, 2, 36, 35, 21, 38, 39, 22, 41, 23, 27, 12 },	/* charts */
 };
@@ -102,6 +101,14 @@ static int is_chart(void)
 	return (current_screen == SCR_GALACTIC_CHART || current_screen == SCR_SHORT_RANGE);
 }
 
+static int icon_func_available(int func);
+static void run_name_entry(void);
+
+int icon_slot_available(int slot)
+{
+	return icon_func_available(icon_funcs[icon_bar_type][slot]);
+}
+
 static void update_icon_bar_type(void)
 {
 	if (is_chart())
@@ -110,6 +117,39 @@ static void update_icon_bar_type(void)
 		icon_bar_type = 0;
 	else
 		icon_bar_type = 1;
+}
+
+static int destination_selected(void)
+{
+	return !(docked_planet.a == hyperspace_planet.a && docked_planet.b == hyperspace_planet.b &&
+			 docked_planet.c == hyperspace_planet.c && docked_planet.d == hyperspace_planet.d &&
+			 docked_planet.e == hyperspace_planet.e && docked_planet.f == hyperspace_planet.f);
+}
+
+/* Can this icon bar function be used right now? (The NES blanks the
+ * buttons that cannot.) */
+static int icon_func_available(int func)
+{
+	switch (func)
+	{
+		case 0:  return 0;
+		case 1:  return docked;								/* launch */
+		case 5:  return docked;								/* equip ship */
+		case 6:  return docked;								/* save and load */
+		case 7:  return docked;								/* commander name */
+		case 12: return !docked && !witchspace;				/* in-system jump */
+		case 17: return !docked && cmdr.docking_computer;
+		case 21: return !docked;							/* space views */
+		case 22: return !docked && destination_selected();	/* hyperspace */
+		case 23: return !docked && cmdr.ecm;
+		case 24: return !docked && cmdr.missiles > 0;
+		case 25: return !docked && missile_target >= 0;		/* locked on */
+		case 26: return !docked && cmdr.energy_bomb;
+		case 27: return !docked && cmdr.escape_pod && !witchspace;
+		case 41: return !docked && cmdr.galactic_hyperdrive;
+		case 2:  return !witchspace;						/* market prices */
+		default: return 1;
+	}
 }
 
 static void request_docking_computer(void)
@@ -280,6 +320,93 @@ static void run_pause_menu(void)
 			quit_screen();
 			break;
 	}
+}
+
+
+/*
+ * Commander name entry (the "AAA" button on the docked icon bar).
+ * Up/Down picks a letter, Right keeps it, A accepts, B deletes a letter
+ * or, with nothing typed, leaves the name as it was.
+ */
+#define NAME_MAX_LEN 7
+
+static void run_name_entry(void)
+{
+	char name[NAME_MAX_LEN + 1] = "";
+	char line[64];
+	int letter = 0;
+	int done = 0;
+	int redraw = 1;
+
+	current_screen = SCR_PAUSE_MENU;
+	gfx_clear_display();
+	gfx_clear_area(0, ICON_BAR_TEXT_Y, 511, N64_SCREEN_H - 1);
+	gfx_display_centre_text(10, "COMMANDER NAME", 140, GFX_COL_GOLD);
+	gfx_draw_line(0, 36, 511, 36);
+	snprintf(line, sizeof(line), "Current name: %s", cmdr.name);
+	gfx_display_centre_text(110, line, 120, GFX_COL_WHITE);
+	gfx_display_centre_text(300, "Up/Down: letter   Right: next letter", 120, GFX_COL_GREY_1);
+	gfx_display_centre_text(320, "A: accept   B: delete / cancel", 120, GFX_COL_GREY_1);
+
+	while (!done)
+	{
+		int len = strlen(name);
+
+		if (redraw)
+		{
+			gfx_clear_area(0, 160, 511, 200);
+			if (len < NAME_MAX_LEN)
+				sprintf(line, "%s%c", name, 'A' + letter);
+			else
+				strcpy(line, name);
+			gfx_display_centre_text(170, line, 140, GFX_COL_GOLD);
+			redraw = 0;
+		}
+
+		gfx_update_screen();
+		kbd_poll_keyboard();
+
+		if (kbd_up_pressed)
+		{
+			letter = (letter + 1) % 26;
+			redraw = 1;
+		}
+		else if (kbd_down_pressed)
+		{
+			letter = (letter + 25) % 26;
+			redraw = 1;
+		}
+		else if (kbd_right_pressed && len < NAME_MAX_LEN)
+		{
+			name[len] = 'A' + letter;
+			name[len + 1] = '\0';
+			redraw = 1;
+		}
+		else if (kbd_enter_pressed)
+		{
+			/* The letter on show counts as part of the name. */
+			if (len < NAME_MAX_LEN)
+			{
+				name[len] = 'A' + letter;
+				name[len + 1] = '\0';
+			}
+			strcpy(cmdr.name, name);
+			done = 1;
+		}
+		else if (kbd_backspace_pressed)
+		{
+			if (len > 0)
+			{
+				name[len - 1] = '\0';
+				redraw = 1;
+			}
+			else
+				done = 1;
+		}
+	}
+
+	frame_count = 0;
+	display_commander_status();
 }
 
 
@@ -518,6 +645,8 @@ static void process_icon_bar(void)
 		return;
 
 	func = icon_funcs[icon_bar_type][icon_bar_cursor];
+	if (!icon_func_available(func))
+		return;
 
 	/* The NES button numbers (see the TT102 routine in the NES source). */
 	switch (func)
@@ -542,6 +671,9 @@ static void process_icon_bar(void)
 		case 6:  /* Save and Load */
 			if (docked)
 				kbd_F11_pressed = 1;
+			break;
+		case 7:  /* Change Commander Name */
+			run_name_entry();
 			break;
 		case 8:  /* Inventory */
 			kbd_F10_pressed = 1;
@@ -1095,6 +1227,7 @@ void run_escape_sequence(void)
 		gfx_display_centre_text(GFX_MESSAGE_Y, "Escape pod launched - Ship auto-destuct initiated.", 120, GFX_COL_WHITE);
 
 		update_console();
+		gfx_request_direct_frame();
 		gfx_update_screen();
 	}
 
@@ -1118,6 +1251,7 @@ void run_escape_sequence(void)
 		update_starfield();
 		update_universe();
 		update_console();
+		gfx_request_direct_frame();
 		gfx_update_screen();
 	}
 
@@ -1510,7 +1644,6 @@ void load_commander_screen(void)
 	}
 
 	restore_saved_commander();
-	set_commander_name("JAMESON");
 	saved_cmdr = cmdr;
 }
 
@@ -1534,6 +1667,7 @@ void run_first_intro_screen(void)
 	{
 		update_intro1();
 
+		gfx_request_direct_frame();
 		gfx_update_screen();
 
 		kbd_poll_keyboard();
@@ -1578,6 +1712,7 @@ void run_second_intro_screen(void)
 	{
 		update_intro2();
 
+		gfx_request_direct_frame();
 		gfx_update_screen();
 
 		kbd_poll_keyboard();
@@ -1637,6 +1772,7 @@ void run_game_over_screen()
 		update_universe();
 		gfx_display_centre_text(GFX_Y_CENTRE - 8, "GAME OVER", 140, GFX_COL_GOLD);
 		update_console();
+		gfx_request_direct_frame();
 		gfx_update_screen();
 	}
 }
@@ -1663,6 +1799,8 @@ void display_break_pattern(void)
 
 	if (docked)
 	{
+		/* Briefings are text screens, not part of the launch tunnel. */
+		current_screen = SCR_MISSION;
 		check_mission_brief();
 		update_condition();
 		display_commander_status();

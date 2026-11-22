@@ -77,9 +77,13 @@ extern int gfx_y_centre;
 void gfx_set_layout (int layout);
 int gfx_get_layout (void);
 void gfx_draw_icon_bar (int type, int y);
+void gfx_blank_icon (int slot, int y);
 void gfx_request_direct_frame (void);
 const unsigned short *gfx_palette16 (void);
 void gfx_blit_span16 (int x, int y, const unsigned short *pixels, int count);
+int gfx_band_planet_begin (const unsigned char *bands, int count);
+void gfx_band_planet_span (int x, int y, int count, float band, float band_step);
+void gfx_band_planet_end (void);
 
 #define N64_SCREEN_W	640
 #define N64_SCREEN_H	480

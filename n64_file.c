@@ -61,6 +61,7 @@ int n64_save_exists(void)
  * save (which uses blocks 0-32), and applied over the defaults at start-up.
  */
 #define SETTINGS_BLOCK	48
+#define NAME_BLOCK		34
 
 void write_config_file(void)
 {
@@ -397,6 +398,20 @@ int save_commander_file(char *path)
 		}
 	}
 
+	/* The commander's name is not part of the original save block; it
+	 * lives in the two EEPROM blocks after it. */
+	{
+		uint8_t name_buf[16];
+		memset(name_buf, 0, sizeof(name_buf));
+		{
+			int n;
+			for (n = 0; n < 15 && cmdr.name[n]; n++)
+				name_buf[n] = cmdr.name[n];
+		}
+		eeprom_write(NAME_BLOCK, name_buf);
+		eeprom_write(NAME_BLOCK + 1, name_buf + 8);
+	}
+
 	return 0;
 }
 
@@ -489,6 +504,23 @@ int load_commander_file(char *path)
 
 	saved_cmdr.score = block[71];
 	saved_cmdr.score += block[72] << 8;
+
+	/* Commander name (absent in saves made before names could be changed). */
+	{
+		uint8_t name_buf[16];
+		int ok, n;
+
+		eeprom_read(NAME_BLOCK, name_buf);
+		eeprom_read(NAME_BLOCK + 1, name_buf + 8);
+		name_buf[15] = 0;
+
+		ok = (name_buf[0] != 0);
+		for (n = 0; name_buf[n]; n++)
+			if (!isalnum(name_buf[n]))
+				ok = 0;
+
+		strcpy(saved_cmdr.name, ok ? (char *)name_buf : "JAMESON");
+	}
 
 	return 0;
 }

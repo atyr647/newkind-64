@@ -586,6 +586,11 @@ void generate_landscape (int rnd_seed)
  */
 
 
+#ifdef PLATFORM_N64
+static int planet_hw_bands;		/* this planet is being drawn by the RDP */
+static int planet_double_rows;	/* software renderer: two lines at a time */
+#endif
+
 void render_planet_line (int xo, int yo, int x, int y, int radius, int vx, int vy)
 {
 	int rx, ry;
@@ -624,6 +629,20 @@ void render_planet_line (int xo, int yo, int x, int y, int radius, int vx, int v
 	if (div == 0) return;
 
 #ifdef PLATFORM_N64
+	if (planet_hw_bands)
+	{
+		/* Hardware path: hand the RDP this line of the disc. The band
+		 * number is the landscape y coordinate, ry / div. */
+		gfx_band_planet_span (sx, sy, ex - sx + 1,
+							  (float)ry / (float)div, (float)vy / (float)div);
+		return;
+	}
+
+	/* Close up, when the disc covers most of the view, draw it two lines
+	 * at a time: work out the even lines and repeat each on the line below. */
+	if (planet_double_rows && (sy & 1))
+		return;
+
 	{
 		/*
 		 * The landscape coordinates change linearly along the line, so step
@@ -662,6 +681,8 @@ void render_planet_line (int xo, int yo, int x, int y, int radius, int vx, int v
 		}
 
 		gfx_blit_span16 (sx, sy, span, count);
+		if (planet_double_rows && sy + 1 <= GFX_VIEW_BY + GFX_Y_OFFSET)
+			gfx_blit_span16 (sx, sy + 1, span, count);
 	}
 #else
 	for (; sx <= ex; sx++)
@@ -695,6 +716,15 @@ void render_planet (int xo, int yo, int radius, struct vector *vec)
 	vx = vec[1].x * 65536;
 	vy = vec[1].y * 65536;
 
+#ifdef PLATFORM_N64
+	/* A planet whose colour depends only on landscape y (the SNES style)
+	 * is a stack of bands, which the RDP can fill for us. */
+	planet_hw_bands = 0;
+	planet_double_rows = (radius > 150);
+	if (planet_render_style == 2)
+		planet_hw_bands = gfx_band_planet_begin (landscape[0], LAND_Y_MAX + 1);
+#endif
+
 	s = radius;
 	x = radius;
 	y = 0;
@@ -715,6 +745,14 @@ void render_planet (int xo, int yo, int radius, struct vector *vec)
 			x--;
 		}
 	}
+
+#ifdef PLATFORM_N64
+	if (planet_hw_bands)
+	{
+		gfx_band_planet_end();
+		planet_hw_bands = 0;
+	}
+#endif
 }
 
 
@@ -1099,7 +1137,7 @@ void draw_explosion (struct univ_object *univ)
 void draw_ship (struct univ_object *ship)
 {
 
-	if ((current_screen != SCR_FRONT_VIEW) && (current_screen != SCR_REAR_VIEW) && 
+	if ((current_screen != SCR_MISSION) && (current_screen != SCR_FRONT_VIEW) && (current_screen != SCR_REAR_VIEW) && 
 		(current_screen != SCR_LEFT_VIEW) && (current_screen != SCR_RIGHT_VIEW) &&
 		(current_screen != SCR_INTRO_ONE) && (current_screen != SCR_INTRO_TWO) &&
 		(current_screen != SCR_GAME_OVER) && (current_screen != SCR_ESCAPE_POD))

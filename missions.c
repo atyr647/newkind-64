@@ -184,7 +184,7 @@ void constrictor_mission_brief (void)
 
 	cmdr.mission = 1;
 
-	current_screen = SCR_FRONT_VIEW;
+	current_screen = SCR_MISSION;
 
 	gfx_clear_display();
 	gfx_display_centre_text (10, "INCOMING MESSAGE", 140, GFX_COL_GOLD);
@@ -209,7 +209,9 @@ void constrictor_mission_brief (void)
 	do
 	{
 		gfx_clear_area (310, 50, 510, 180);
+		gfx_set_clip_region (310, 50, 510, 180);	/* keep the ship in its window */
 		update_universe ();
+		gfx_set_clip_region (1, 1, 510, GFX_VIEW_BY);
 		universe[0].location.z = 600;
 		gfx_update_screen();
 		kbd_poll_keyboard();

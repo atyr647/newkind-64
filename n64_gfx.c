@@ -68,6 +68,40 @@ static int direct_hint;          /* one-shot request for the next frame */
 static int direct_frames;        /* consecutive direct frames so far */
 #define NUM_DISPLAY_BUFFERS 3
 
+/*
+ * Hardware drawing (RDP).
+ *
+ * While a frame is being drawn directly into a display surface, the RDP is
+ * attached to that surface and does the jobs it is far better at than the
+ * CPU: wiping the view at the start of the frame, and filling the banded
+ * planet. Everything else is still drawn by the CPU into the same surface,
+ * so the two must never be drawing at once: hw_sync() waits for the RDP
+ * to finish before the CPU carries on.
+ */
+static int rdp_attached;         /* RDP is attached to cur_surface */
+static int rdp_busy;             /* RDP commands issued since the last sync */
+static int view_precleared;      /* the RDP has already wiped this frame's view */
+
+static void hw_sync(void)
+{
+	if (rdp_busy)
+	{
+		rspq_wait();
+		rdp_busy = 0;
+	}
+}
+
+static void hw_release(void)
+{
+	if (rdp_attached)
+	{
+		rdpq_detach_wait();
+		rdp_attached = 0;
+	}
+	rdp_busy = 0;
+	view_precleared = 0;
+}
+
 #define MAX_POLYS	100
 
 static int start_poly;
@@ -233,6 +267,7 @@ int gfx_graphics_startup(void)
 {
 	/* 640x480 interlaced, 16-bit colour. */
 	display_init(RESOLUTION_640x480, DEPTH_16_BPP, NUM_DISPLAY_BUFFERS, GAMMA_NONE, FILTERS_RESAMPLE);
+	rdpq_init();
 
 	/* The dashboard BMP carries the game palette (the original Elite palette
 	 * plus the private NES dashboard colours). */
@@ -249,6 +284,7 @@ int gfx_graphics_startup(void)
 	active_fb = framebuf;
 	cur_surface = NULL;
 	direct_mode = direct_hint = direct_frames = 0;
+	rdp_attached = rdp_busy = view_precleared = 0;
 
 	/* Set default clip region to full screen */
 	clip_tx = 0;
@@ -315,6 +351,7 @@ static void leave_direct_mode(int keep_picture)
 {
 	if (!direct_mode)
 		return;
+	hw_release();
 	if (keep_picture)
 		memcpy(framebuf, surface_pixels(cur_surface), sizeof(framebuf));
 	active_fb = framebuf;
@@ -375,6 +412,7 @@ void gfx_update_screen(void)
 
 	if (direct_mode)
 	{
+		hw_release();
 #if DIRECT_CACHED
 		data_cache_hit_writeback_invalidate(surface_pixels(cur_surface), sizeof(framebuf));
 #endif
@@ -395,13 +433,26 @@ void gfx_update_screen(void)
 		active_fb = surface_pixels(cur_surface);
 		direct_mode = 1;
 
-		/* Each display buffer still holds whatever was shown a few frames
-		 * ago, so wipe each one the first time it is used directly. */
-		if (direct_frames < NUM_DISPLAY_BUFFERS)
+		/* Let the RDP wipe the view while the CPU gets on with reading the
+		 * controller and running the simulation. Each display buffer still
+		 * holds whatever was shown a few frames ago, so the first time one
+		 * is used directly the whole screen is wiped instead. */
+		rdpq_attach(cur_surface, NULL);
+		rdp_attached = 1;
+		rdpq_set_mode_fill(RGBA32(0, 0, 0, 255));
+		if (direct_frames < NUM_DISPLAY_BUFFERS || cur_layout != GFX_LAYOUT_SPACE)
 		{
-			memset(active_fb, 0, sizeof(framebuf));
-			direct_frames++;
+			rdpq_fill_rectangle(0, 0, N64_SCREEN_W, N64_SCREEN_H);
+			if (direct_frames < NUM_DISPLAY_BUFFERS)
+				direct_frames++;
 		}
+		else
+		{
+			rdpq_fill_rectangle(GFX_X_OFFSET, GFX_Y_OFFSET,
+			                    GFX_X_OFFSET + 512, GFX_Y_OFFSET + GFX_SPACE_VIEW_BY + 1);
+		}
+		rdp_busy = 1;
+		view_precleared = 1;
 	}
 }
 
@@ -418,8 +469,9 @@ void gfx_set_layout(int layout)
 	if (layout == cur_layout)
 		return;
 
-	/* Text screens are drawn once and kept, so they need the framebuf. */
-	if (!is_space)
+	/* Text screens are drawn once and kept, so they need the framebuf.
+	 * (The title screens redraw every frame, like the space views.) */
+	if (layout == GFX_LAYOUT_TEXT)
 		leave_direct_mode(0);
 
 	cur_layout = layout;
@@ -429,6 +481,8 @@ void gfx_set_layout(int layout)
 	if (was_space != is_space || layout == GFX_LAYOUT_TITLE)
 	{
 		int y;
+		hw_sync();
+		view_precleared = 0;
 		for (y = 0; y < N64_SCREEN_H; y++)
 			memset(&active_fb[y * N64_SCREEN_W + GFX_X_OFFSET], 0, 512 * sizeof(uint16_t));
 	}
@@ -461,6 +515,65 @@ const uint16_t *gfx_palette16(void)
 void gfx_blit_span16(int x, int y, const uint16_t *pixels, int count)
 {
 	memcpy(&active_fb[y * N64_SCREEN_W + x], pixels, count * sizeof(uint16_t));
+}
+
+/*
+ * Banded planet, drawn by the RDP.
+ *
+ * The "SNES" planet is a disc of parallel colour bands: along any screen
+ * line the band number changes linearly. That is exactly a one-dimensional
+ * texture stretched along the line, so each line of the disc becomes one
+ * textured rectangle and the RDP fills the pixels.
+ *
+ * gfx_band_planet_begin() returns 0 when hardware drawing is not available
+ * for this frame (the caller then uses the software renderer).
+ */
+#define BAND_TEX_W		512
+#define BAND_TEX_SCALE	(BAND_TEX_W / 128)
+
+static uint16_t band_tex[BAND_TEX_W * 2] __attribute__((aligned(16)));
+
+int gfx_band_planet_begin(const unsigned char *bands, int count)
+{
+	surface_t tex;
+	int i;
+
+	if (!direct_mode || !rdp_attached || count <= 0)
+		return 0;
+
+	hw_sync();
+
+	for (i = 0; i < BAND_TEX_W; i++)
+	{
+		int b = i / BAND_TEX_SCALE;
+		if (b >= count) b = count - 1;
+		band_tex[i] = band_tex[BAND_TEX_W + i] = palette_rgba16[bands[b]] | 1;
+	}
+	data_cache_hit_writeback(band_tex, sizeof(band_tex));
+
+	tex = surface_make_linear(band_tex, FMT_RGBA16, BAND_TEX_W, 2);
+
+	rdpq_set_mode_standard();
+	rdpq_mode_filter(FILTER_POINT);
+	rdpq_mode_combiner(RDPQ_COMBINER_TEX);
+	rdpq_tex_upload(TILE0, &tex, NULL);
+	rdp_busy = 1;
+	return 1;
+}
+
+/* One line of the disc: count pixels from (x, y); band is the (fractional)
+ * band number at the first pixel and band_step how much it changes per pixel. */
+void gfx_band_planet_span(int x, int y, int count, float band, float band_step)
+{
+	float s0 = band * BAND_TEX_SCALE;
+	float s1 = s0 + band_step * BAND_TEX_SCALE * count;
+
+	rdpq_texture_rectangle_scaled(TILE0, x, y, x + count, y + 1, s0, 0, s1, 1);
+}
+
+void gfx_band_planet_end(void)
+{
+	hw_sync();
 }
 
 void gfx_fast_plot_pixel(int x, int y, int col)
@@ -887,12 +1000,28 @@ void gfx_clear_display(void)
 
 	if (cur_layout == GFX_LAYOUT_SPACE)
 	{
-		fast_clear_region(GFX_X_OFFSET, GFX_Y_OFFSET,
-		                  GFX_X_OFFSET + 511, GFX_Y_OFFSET + GFX_SPACE_VIEW_BY);
+		if (direct_mode && view_precleared)
+		{
+			/* Already wiped by the RDP when the frame was started. */
+			hw_sync();
+			view_precleared = 0;
+		}
+		else
+		{
+			hw_sync();
+			fast_clear_region(GFX_X_OFFSET, GFX_Y_OFFSET,
+			                  GFX_X_OFFSET + 511, GFX_Y_OFFSET + GFX_SPACE_VIEW_BY);
+		}
+	}
+	else if (direct_mode && view_precleared)
+	{
+		hw_sync();
+		view_precleared = 0;
 	}
 	else
 	{
 		/* Everything above the icon bar. */
+		hw_sync();
 		fast_clear_region(GFX_X_OFFSET, GFX_Y_OFFSET,
 		                  GFX_X_OFFSET + 511, GFX_Y_OFFSET + ICON_BAR_TEXT_Y - 1);
 	}
@@ -979,6 +1108,33 @@ void gfx_draw_scanner(void)
 {
 	if (scanner_rgba)
 		blit_rows(scanner_rgba, scanner_w, scanner_h, SCANNER_Y + GFX_Y_OFFSET);
+}
+
+/*
+ * Blank out one button of the icon bar just drawn at line y, for functions
+ * that cannot be used right now (as the NES does). The buttons are 40
+ * pixels apart; the docked bar's unused tenth button supplies the blank.
+ */
+static int icon_face_x(int slot)
+{
+	return slot * 40 + 16;
+}
+
+void gfx_blank_icon(int slot, int y)
+{
+	int row;
+
+	if (!iconbar_rgba || slot < 0 || slot > 11 || iconbar_w < 512)
+		return;
+
+	for (row = 0; row < ICON_BAR_H; row++)
+	{
+		int dy = y + GFX_Y_OFFSET + row;
+		if (dy < 0 || dy >= N64_SCREEN_H)
+			continue;
+		memcpy(&active_fb[dy * N64_SCREEN_W + GFX_X_OFFSET + icon_face_x(slot)],
+		       &iconbar_rgba[row * iconbar_w + icon_face_x(9)], 40 * sizeof(uint16_t));
+	}
 }
 
 /* Draw one of the icon bars (0 = docked, 1 = flight, 2 = charts) at line y. */

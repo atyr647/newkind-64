@@ -41,6 +41,7 @@
 #define SCR_SETTINGS		20
 #define SCR_ESCAPE_POD		21
 #define SCR_RESTART             22
+#define SCR_MISSION			23	/* mission briefings (N64: a text screen) */
 
 #define PULSE_LASER		0x0F
 #define BEAM_LASER		0x8F
