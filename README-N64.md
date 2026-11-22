@@ -90,28 +90,25 @@ tiny3d: the original Elite ship shapes and face colours, lit from the
 system's sun and depth-buffered. Solid and Wireframe are the previous
 software renderers, unchanged.
 
-Ships listed in `ships/` (so far the Cobra Mk III) use a new, more detailed
-textured model instead of the original geometry. It follows the original's
-overall shape and is scaled to exactly the same size, so it flies, collides
-and docks identically.
+Ships listed in `ships/` (so far the Cobra Mk III) also get painted surface
+detail. The geometry and each face's colour are exactly the originals; every
+face is textured in its own colour with armour plating, seams, rivets, vents
+and a bevelled trim along its edges, and engine faces glow.
 
 An **Expansion Pak is required**.
 
-### Adding a ship model
+### Detailing a ship
 
-Start from a detailed model with a texture (the Cobra's was generated with
-Tripo from a description of the original ship), saved as a GLB:
-
-    python3 tools/convert_ship_model.py cobra3 model.glb cobra3a_point 500
+    python3 tools/detail_ship.py cobra3 cobra3a_point
     python3 tools/gen_ship_textures.py          # rewrites n64_shiptex.c
 
-The converter reduces the model to about 500 triangles, makes it symmetric,
-trims thin probes, fits it to the original ship's bounding box, and bakes
-its surface into 16-colour 64x64 textures (the most that fits the N64's
-texture memory at once). Large surfaces are covered by several of these
-tiles side by side - about one texel per game unit - so they stay sharp. List the game ship types that use it in `SHIP_TYPES` in
+`detail_ship.py` reads the ship straight from `shipdata.c` / `shipface.c` and
+writes its textures and layout to `ships/`. Textures are 16-colour tiles of at
+most 64x64 (what fits the N64's texture memory at once); a large face is
+covered by up to 2x2 tiles so the detail stays sharp, and mirror-image faces
+share textures. List the game ship types that use it in `SHIP_TYPES` in
 `tools/gen_ship_textures.py`. `tools/ship_export.py` renders pictures of the
-original ships to describe or show to a model generator.
+original ships and exports their meshes.
 
 ## How the N64 hardware is used
 

@@ -185,6 +185,68 @@ static void build_mesh_model(struct hw_model *model, const struct ship_mesh *mes
 
 
 /*
+ * Some faces lie exactly on top of a larger one (the slot on a station,
+ * engines on a rear face). With a depth buffer those would flicker, so a
+ * face that shares its plane with a bigger face is lifted slightly off it.
+ * Returns how far to move face i along its normal.
+ */
+static float face_area(const struct ship_data *ship, const struct ship_face *face)
+{
+	const struct ship_point *p0 = &ship->points[face_point(face, 0)];
+	float ax = 0, ay = 0, az = 0;
+	int k;
+
+	for (k = 1; k + 1 < face->points; k++)
+	{
+		const struct ship_point *p1 = &ship->points[face_point(face, k)];
+		const struct ship_point *p2 = &ship->points[face_point(face, k + 1)];
+		float ux = p1->x - p0->x, uy = p1->y - p0->y, uz = p1->z - p0->z;
+		float vx = p2->x - p0->x, vy = p2->y - p0->y, vz = p2->z - p0->z;
+		ax += uy * vz - uz * vy;
+		ay += uz * vx - ux * vz;
+		az += ux * vy - uy * vx;
+	}
+	return 0.5f * sqrtf(ax * ax + ay * ay + az * az);
+}
+
+static float face_lift(const struct ship_data *ship, const struct ship_solid *solid, int i)
+{
+	const struct ship_face *fi = &solid->face_data[i];
+	float li = sqrtf(fi->norm_x * fi->norm_x + fi->norm_y * fi->norm_y + fi->norm_z * fi->norm_z);
+	const struct ship_point *pi = &ship->points[face_point(fi, 0)];
+	float di, ai;
+	int j;
+
+	if (li < 0.001f || fi->points < 3)
+		return 0;
+
+	di = (pi->x * fi->norm_x + pi->y * fi->norm_y + pi->z * fi->norm_z) / li;
+	ai = face_area(ship, fi);
+
+	for (j = 0; j < solid->num_faces; j++)
+	{
+		const struct ship_face *fj = &solid->face_data[j];
+		float lj = sqrtf(fj->norm_x * fj->norm_x + fj->norm_y * fj->norm_y + fj->norm_z * fj->norm_z);
+		const struct ship_point *pj;
+		float cosang, dj;
+
+		if (j == i || fj->points < 3 || lj < 0.001f)
+			continue;
+
+		cosang = (fi->norm_x * fj->norm_x + fi->norm_y * fj->norm_y + fi->norm_z * fj->norm_z) / (li * lj);
+		if (cosang < 0.999f)
+			continue;
+
+		pj = &ship->points[face_point(fj, 0)];
+		dj = (pj->x * fi->norm_x + pj->y * fi->norm_y + pj->z * fi->norm_z) / li;
+		if (fabsf(di - dj) < 1.0f && face_area(ship, fj) > ai * 1.05f)
+			return 2.0f;
+	}
+	return 0;
+}
+
+
+/*
  * Build the vertex buffer and display list for one ship type.
  *
  * Every face gets its own vertices (so it can carry its own normal and
@@ -205,7 +267,13 @@ static void build_model(int type)
 
 	model->built = -1;
 
-	/* A replacement model takes precedence over the original geometry. */
+	/* Single-line faces (aerials and so on) are drawn separately. */
+	if (solid->face_data)
+		for (i = 0; i < solid->num_faces; i++)
+			if (solid->face_data[i].points == 2)
+				model->has_lines = 1;
+
+	/* A detailed model takes precedence over the plain geometry. */
 	for (i = 0; ship_meshes[i].num_batches; i++)
 	{
 		if (ship_meshes[i].ship_type == type)
@@ -264,6 +332,7 @@ static void build_model(int type)
 			int r, g, b;
 			uint32_t rgba;
 			float len;
+			float lift;
 
 			face_batch[i] = -1;
 
@@ -297,6 +366,7 @@ static void build_model(int type)
 				normal.v[2] /= len;
 			}
 			packed_normal = t3d_vert_pack_normal(&normal);
+			lift = face_lift(ship, solid, i);
 
 			gfx_palette_rgb(face->colour, &r, &g, &b);
 			rgba = ((uint32_t)r << 24) | ((uint32_t)g << 16) | ((uint32_t)b << 8) | 0xFF;
@@ -309,9 +379,9 @@ static void build_model(int type)
 				const struct ship_point *p = &ship->points[face_point(face, k)];
 				int16_t *pos = t3d_vertbuffer_get_pos(model->verts, next);
 
-				pos[0] = p->x;
-				pos[1] = p->y;
-				pos[2] = p->z;
+				pos[0] = p->x + (int)lroundf(normal.v[0] * lift);
+				pos[1] = p->y + (int)lroundf(normal.v[1] * lift);
+				pos[2] = p->z + (int)lroundf(normal.v[2] * lift);
 				*t3d_vertbuffer_get_norm(model->verts, next) = packed_normal;
 				*t3d_vertbuffer_get_color(model->verts, next) = rgba;
 
@@ -491,8 +561,8 @@ static void draw_model_lines(const struct hw_queued *q)
  */
 void hw_ships_flush(void)
 {
-	static const uint8_t ambient[4] = { 140, 140, 150, 255 };
-	static const uint8_t sunlight[4] = { 200, 195, 180, 255 };
+	static const uint8_t ambient[4] = { 165, 165, 175, 255 };
+	static const uint8_t sunlight[4] = { 170, 165, 150, 255 };
 	T3DVec3 dir;
 	int height = GFX_VIEW_BY + 1;
 	int i;
@@ -592,7 +662,7 @@ void hw_ships_flush(void)
 	rdpq_set_scissor(0, 0, N64_SCREEN_W, N64_SCREEN_H);
 
 	for (i = 0; i < queued; i++)
-		if (models[queue[i].type].has_lines && !models[queue[i].type].mesh)
+		if (models[queue[i].type].has_lines)
 			draw_model_lines(&queue[i]);
 
 	queued = 0;
