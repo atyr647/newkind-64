@@ -4,8 +4,10 @@ Add painted surface detail to an original Elite ship.
 
 The ship's geometry and face colours are exactly those in shipdata.c and
 shipface.c. Each flat face is given its own texture, painted here in the
-face's original colour: armour plating with seams and rivets, a bevelled
-trim along every edge, the odd vent, and a glow on engine faces.
+face's original colour. The paintwork is laid out over the whole ship, not
+face by face, so it reads as one design: irregular hull panels, a cockpit
+canopy at the nose, wing stripes and a roundel, hazard markings and scorching
+by the engines, a belly hatch, weathering, and an exhaust glow on engine faces.
 
   detail_ship.py <ship> [points]
 
@@ -88,16 +90,43 @@ def inside_poly(px, py, poly):
     return inside
 
 
-def paint_face(base_rgb, pu, pv, poly, seed, is_engine, sym_u):
+class Layout:
+    """
+    The ship-wide panel plan: irregular cuts across the hull (by distance
+    from the centre line) and along it, shared by every face so panel lines
+    run on from one face to the next and match left and right.
+    """
+
+    def __init__(self, pts, seed):
+        self.lo, self.hi = pts.min(axis=0), pts.max(axis=0)
+        self.half_width = max(abs(self.lo[0]), abs(self.hi[0]), 1.0)
+        self.length = max(self.hi[2] - self.lo[2], 1.0)
+        self.seed = seed
+        self.cuts_x = self._cuts(0.0, self.half_width, seed, "x")
+        self.cuts_z = self._cuts(self.lo[2], self.hi[2], seed, "z")
+
+    @staticmethod
+    def _cuts(lo, hi, seed, tag):
+        cuts, pos, k = [lo - 1e-3], lo, 0
+        while pos < hi:
+            pos += 16.0 + 30.0 * hash01(seed, tag, k)      # panels 16-46 units
+            cuts.append(pos)
+            k += 1
+        return np.array(cuts)
+
+    def table(self, tag, shape):
+        """A repeatable table of random numbers, one per panel."""
+        return np.array([[hash01(self.seed, tag, i, j) for j in range(shape[1])] for i in range(shape[0])])
+
+
+def paint_face(base_rgb, pu, pv, poly, seed, is_engine, sym_u, world, normal, layout):
     """
     Colour for every sample of a face. pu, pv are positions on the face in
-    game units, poly its outline. sym_u, if not None, is the u position of
-    the ship's centre line: the pattern is then mirrored about it.
+    game units and poly its outline; world gives each sample's position on
+    the ship, normal the way the face points.
     """
     base = np.array(base_rgb, float)
-    qu = np.abs(pu - sym_u) if sym_u is not None else pu
     edge = edge_distance(pu, pv, poly)
-    shade = np.ones(pu.shape)
 
     if is_engine:
         # Exhaust: white-hot core, through yellow and orange to the face colour.
@@ -112,50 +141,122 @@ def paint_face(base_rgb, pu, pv, poly, seed, is_engine, sym_u):
             m = (r >= r0) & (r <= r1)
             t = ((r - r0) / (r1 - r0))[..., None]
             col[m] = (np.array(c0) * (1 - t) + np.array(c1) * t)[m]
-        ring = np.abs(r - 1.0) < 0.07                     # nozzle rim
-        col[ring] = base * 0.3
+        col[np.abs(r - 1.0) < 0.07] = base * 0.3              # nozzle rim
         col[edge < TRIM * 0.6] = base * 0.4
         return col
 
-    # --- plating: staggered rows of panels -----------------------------------
-    row = np.floor(pv / PANEL_H).astype(int)
-    row_shift = np.vectorize(lambda r: hash01(seed, "row", int(r)) * PANEL_W)(row)
-    colf = (qu + row_shift) / PANEL_W
-    col = np.floor(colf).astype(int)
-    fu = (colf - col) * PANEL_W                 # position inside the panel
-    fv = pv - row * PANEL_H
+    wx, wy, wz = world[..., 0], world[..., 1], world[..., 2]
+    xa = np.abs(wx)                                   # distance from the centre line
+    xn = xa / layout.half_width                       # 0 centre .. 1 wing tip
+    zn = (wz - layout.lo[2]) / layout.length          # 0 stern .. 1 nose
+    flat = abs(normal[1]) > 0.45                      # a top or bottom face
+    top = normal[1] > 0.45
+    bottom = normal[1] < -0.45
 
-    # each panel is a slightly different shade
-    tint = np.vectorize(lambda r, c: hash01(seed, "tint", int(r), int(c)))(row, col)
-    shade *= 0.93 + 0.14 * tint
+    col = np.broadcast_to(base, pu.shape + (3,)).copy()
+    shade = np.ones(pu.shape)
 
-    # a few panels are vents: dark slats
-    kind = np.vectorize(lambda r, c: hash01(seed, "kind", int(r), int(c)))(row, col)
-    vent = (kind > 0.88) & (fu > 5) & (fu < PANEL_W - 5) & (fv > 4.5) & (fv < PANEL_H - 4.5)
-    shade[vent & (np.floor(fv / 1.6) % 2 == 0)] *= 0.45
-    shade[vent & (np.floor(fv / 1.6) % 2 == 1)] *= 0.8
+    # --- hull panels ----------------------------------------------------------
+    if flat:
+        a, b, ca, cb = xa, wz, layout.cuts_x, layout.cuts_z
+    else:                                             # sides: plan them along the face
+        ca = Layout._cuts(0.0, float(pu.max()) + 1, seed, "u")
+        cb = Layout._cuts(0.0, float(pv.max()) + 1, seed, "v")
+        a, b = pu, pv
+    ia = np.clip(np.searchsorted(ca, a) - 1, 0, len(ca) - 2)
+    ib = np.clip(np.searchsorted(cb, b) - 1, 0, len(cb) - 2)
+    shape = (len(ca) + 1, len(cb) + 1)
+    tag = "flat" if flat else ("side", seed)
+    tint = layout.table(("tint", tag), shape)
+    seam_a = layout.table(("seam_a", tag), shape) > 0.30     # is this boundary a seam?
+    seam_b = layout.table(("seam_b", tag), shape) > 0.30
+    shade *= 0.92 + 0.16 * tint[ia, ib]
 
-    # seams: a dark groove with a catch-light along one side
-    seam_d = np.minimum(np.minimum(fu, PANEL_W - fu), np.minimum(fv, PANEL_H - fv))
-    light = (np.minimum(fu - SEAM, fv - SEAM) < SEAM * 1.3) & (seam_d >= SEAM)
-    shade[light] *= 1.16
-    shade[seam_d < SEAM] *= 0.5
+    d_lo_a, d_hi_a = a - ca[ia], ca[ia + 1] - a
+    d_lo_b, d_hi_b = b - cb[ib], cb[ib + 1] - b
+    groove = np.zeros(pu.shape, bool)
+    light = np.zeros(pu.shape, bool)
+    for dist, drawn, far in ((d_lo_a, seam_a[ia, ib], False), (d_hi_a, seam_a[ia + 1, ib], True),
+                             (d_lo_b, seam_b[ia, ib], False), (d_hi_b, seam_b[ia, ib + 1], True)):
+        groove |= drawn & (dist < SEAM)
+        if not far:
+            light |= drawn & (dist >= SEAM) & (dist < SEAM * 2.4)
 
-    # rivets near the panel corners
-    for ru, rv in ((4.0, 4.0), (PANEL_W - 4.0, 4.0), (4.0, PANEL_H - 4.0), (PANEL_W - 4.0, PANEL_H - 4.0)):
-        shade[np.hypot(fu - ru, fv - rv) < 1.0] *= 0.6
+    # a recessed frame running parallel to the face's own edges
+    frame = np.abs(edge - 7.0) < SEAM
+    groove |= frame
+    light |= (edge > 7.0 + SEAM) & (edge < 7.0 + SEAM * 2.4)
 
-    # --- edge trim: darker band, bright bevel at the very edge ------------------
-    band = edge < TRIM
-    shade[band] *= 0.74
-    shade[edge < 1.0] *= 1.75
+    shade[light] *= 1.14
+    shade[groove] *= 0.48
+
+    # an occasional access hatch: a darker inset rectangle with a handle
+    kind = layout.table(("kind", tag), shape)[ia, ib]
+    in_a = (d_lo_a > 5) & (d_hi_a > 5)
+    in_b = (d_lo_b > 4) & (d_hi_b > 4)
+    hatch = (kind > 0.86) & in_a & in_b & (edge > 9)
+    hatch_edge = hatch & ((d_lo_a < 6.2) | (d_hi_a < 6.2) | (d_lo_b < 5.2) | (d_hi_b < 5.2))
+    shade[hatch] *= 0.86
+    shade[hatch_edge] *= 0.55
+    vent = (kind < 0.10) & in_a & in_b & (edge > 9) & (d_lo_a > 7) & (d_hi_a > 7)
+    shade[vent & (np.floor(b / 1.7) % 2 == 0)] *= 0.42
+
+    # --- markings ---------------------------------------------------------------
+    inner = edge > 3.0
+    if top:
+        # cockpit canopy: dark glass across the nose, with glazing bars and a glint
+        canopy = (zn > 0.60) & (zn < 0.86) & (xn < 0.20) & inner
+        bars = canopy & ((np.abs((xa / 9.0) % 1.0 - 0.5) > 0.42) | (np.abs(zn - 0.73) < 0.012))
+        glass = canopy & ~bars
+        glint = glass & (np.abs((xa * 0.9 + wz) % 26.0 - 6.0) < 2.2)
+        col[glass] = (22, 34, 58)
+        col[glint] = (120, 160, 205)
+        col[bars] = np.clip(base * 0.55, 0, 255)
+        shade[canopy] = 1.0
+        rim = (zn > 0.585) & (zn < 0.875) & (xn < 0.215) & inner & ~canopy
+        shade[rim] *= 0.55
+
+        # wing stripes and a roundel
+        stripe = inner & (((xn > 0.50) & (xn < 0.535)) | ((xn > 0.56) & (xn < 0.575))) & (zn < 0.62) & (zn > 0.10)
+        col[stripe] = (225, 225, 215)
+        r = np.hypot(xa - 0.34 * layout.half_width, (wz - (layout.lo[2] + 0.30 * layout.length)))
+        col[inner & (r < 8.5)] = (225, 225, 215)
+        col[inner & (r < 6.0)] = (190, 30, 30)
+        col[inner & (r < 2.6)] = (225, 225, 215)
+
+    if bottom:
+        # cargo bay doors on the belly
+        doors = (xn < 0.24) & (zn > 0.30) & (zn < 0.62)
+        door_line = doors & ((xn > 0.225) | (xa < 0.9) | (np.abs(zn - 0.30) < 0.012) | (np.abs(zn - 0.62) < 0.012))
+        shade[doors & inner] *= 0.9
+        shade[door_line & inner] *= 0.45
+        hinge = (np.abs(xn - 0.25) < 0.012) & (np.abs((wz % 14.0) - 7.0) < 2.0) & (zn > 0.30) & (zn < 0.62)
+        col[hinge & inner] = (200, 200, 190)
+
+    if flat:
+        # hazard stripes along the stern, and scorching from the engines
+        hazard = (zn < 0.075) & inner & (xn < 0.62)
+        yellow = hazard & (np.floor((xa + wz) / 5.0) % 2 == 0)
+        col[yellow] = (215, 175, 25)
+        col[hazard & ~yellow] = (28, 28, 28)
+        shade[hazard] = 1.0
+        scorch = np.clip(1.0 - (zn - 0.075) / 0.22, 0, 1) * np.clip(1.0 - np.abs(xn - 0.16) / 0.20, 0, 1)
+        streak = 0.75 + 0.25 * np.sin(xa * 1.9 + np.sin(xa * 0.37) * 3.0)
+        shade *= 1.0 - 0.42 * scorch * streak * (zn >= 0.075)
+
+    # --- lighting and wear baked into the paint -----------------------------------
+    shade *= 0.90 + 0.18 * np.clip(zn, 0, 1)                   # lighter towards the nose
+    grain = (np.sin(wx * 12.9898 + wz * 78.233 + wy * 37.719) * 43758.5453) % 1.0
+    streaks = 0.5 + 0.5 * np.sin(xa * 2.3 + np.sin(xa * 0.61 + seed) * 2.0)
+    shade *= 0.955 + 0.05 * grain + 0.04 * streaks             # fore-aft dirt streaks
+
+    band = edge < TRIM                                         # bevelled edge
+    shade[band] *= 0.76
+    worn = (edge < 1.1)
+    shade[worn] *= 1.55 + 0.5 * (grain[worn] > 0.55)           # chipped, bright edges
     shade[(edge >= TRIM) & (edge < TRIM + 0.9)] *= 0.62
 
-    # a little grain so large faces are not perfectly flat
-    grain = (np.sin(pu * 12.9898 + pv * 78.233 + seed) * 43758.5453) % 1.0
-    shade *= 0.97 + 0.06 * grain
-
-    return np.clip(base[None, None, :] * shade[..., None], 0, 255)
+    return np.clip(col * shade[..., None], 0, 255)
 
 
 def texel_layout(extent):
@@ -192,6 +293,7 @@ def main():
     idx, pal = load_palette()
     pts = np.array(points, float)
     seed = zlib.crc32(ship.encode()) & 0xFFFF
+    layout = Layout(pts, seed)
 
     for old in os.listdir(os.path.join(ROOT, "ships")):
         if old.startswith(ship + "_") and old.endswith(".png"):
@@ -276,7 +378,9 @@ def main():
             gy, gx = np.mgrid[0:th * ss, 0:tw * ss]
             pu = ((gx + 0.5) / ss - 0.5) / su
             pv = ((gy + 0.5) / ss - 0.5) / sv
-            img = paint_face(rgb, pu, pv, poly, seed + i, is_engine, sym_u)
+            nn_ = n / np.linalg.norm(n)
+            world = (pu[..., None] + u0) * u + (pv[..., None] + v0) * v + nn_ * float(pts[vs[0]] @ nn_)
+            img = paint_face(rgb, pu, pv, poly, seed + i, is_engine, sym_u, world, nn_, layout)
             img = img.reshape(th, ss, tw, ss, 3).mean(axis=(1, 3))
             img = np.clip(img, 0, 255).astype(np.uint8)
 

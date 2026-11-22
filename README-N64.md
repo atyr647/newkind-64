@@ -91,9 +91,11 @@ system's sun and depth-buffered. Solid and Wireframe are the previous
 software renderers, unchanged.
 
 Ships listed in `ships/` (so far the Cobra Mk III) also get painted surface
-detail. The geometry and each face's colour are exactly the originals; every
-face is textured in its own colour with armour plating, seams, rivets, vents
-and a bevelled trim along its edges, and engine faces glow.
+detail. The geometry and each face's colour are exactly the originals; the
+paintwork on top is laid out over the whole ship: irregular hull panels, a
+cockpit canopy at the nose, wing stripes and a roundel, hazard markings and
+scorching by the engines, cargo doors on the belly, weathering, and an exhaust
+glow on engine faces.
 
 An **Expansion Pak is required**.
 
