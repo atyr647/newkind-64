@@ -48,6 +48,13 @@ int cross_timer;
 /* frame_count is incremented by the timer in n64_gfx.c at speed_cap rate */
 extern volatile int frame_count;
 
+/* Screen number used while the pause menu is up (not a real game screen). */
+#define SCR_PAUSE_MENU	100
+
+void save_commander_screen(void);
+static void redraw_current_screen(void);
+void f_pressed(void);
+
 int draw_lasers;
 int mcount;
 int message_count;
@@ -68,36 +75,79 @@ char find_name[20];
 /*
  * NES-style icon bar state.
  * The icon bar cursor tracks which icon slot (0-11) is selected.
- * D-pad Left/Right moves it, B activates the selected function.
  *
  * Icon bar type determines which functions are available:
  *   0 = Docked, 1 = Flight, 2 = Charts
  */
-int icon_bar_cursor = 4;    /* Start at center icon */
-int icon_bar_type = 1;      /* 0=docked, 1=flight, 2=charts */
+int icon_bar_cursor = 0;
+int icon_bar_type = 0;      /* 0=docked, 1=flight, 2=charts */
 
-/* NES icon bar function numbers for each type (from NES TT102 dispatch) */
-/* 0 = no function */
-static const int icon_funcs_docked[12] = {
-	1, 2, 3, 4, 5, 6, 0, 35, 8, 0, 0, 12
+/* NES icon bar function numbers for each type (the NES iconBarButtons table).
+ * 0 = no function. Button 7 of the docked bar (change commander name) has no
+ * N64 equivalent. */
+static const int icon_funcs[3][12] = {
+	{  1, 2,  3,  4,  5,  6,  0, 35,  8,  0,  0, 12 },	/* docked */
+	{ 17, 2,  3,  4, 21, 22, 23, 24, 25, 26, 27, 12 },	/* flight */
+	{  1, 2, 36, 35, 21, 38, 39, 22, 41, 23, 27, 12 },	/* charts */
 };
-static const int icon_funcs_flight[12] = {
-	17, 2, 3, 4, 21, 22, 23, 24, 25, 26, 27, 12
-};
-static const int icon_funcs_charts[12] = {
-	1, 2, 36, 35, 21, 38, 39, 22, 41, 23, 27, 12
-};
+
+static int is_space_view(void)
+{
+	return (current_screen == SCR_FRONT_VIEW || current_screen == SCR_REAR_VIEW ||
+			current_screen == SCR_LEFT_VIEW || current_screen == SCR_RIGHT_VIEW);
+}
+
+static int is_chart(void)
+{
+	return (current_screen == SCR_GALACTIC_CHART || current_screen == SCR_SHORT_RANGE);
+}
+
+static void update_icon_bar_type(void)
+{
+	if (is_chart())
+		icon_bar_type = 2;
+	else if (docked)
+		icon_bar_type = 0;
+	else
+		icon_bar_type = 1;
+}
+
+static void request_docking_computer(void)
+{
+	if (docked)
+		info_message("Already docked");
+	else if (!cmdr.docking_computer)
+		info_message("Docking computer not fitted");
+	else if ((universe[1].type == SHIP_CORIOLIS || universe[1].type == SHIP_DODEC) &&
+			 (universe[1].flags & FLG_ANGRY))
+		info_message("Docking permission refused");
+	else if (instant_dock)
+		engage_docking_computer();
+	else
+		engage_auto_pilot();
+}
+
+static void start_find_planet(void)
+{
+	if (!is_chart())
+	{
+		old_cross_x = -1;
+		display_galactic_chart();
+	}
+	f_pressed();
+}
 
 /*
  * N64 Pause Menu - shown when Start is pressed during gameplay.
- * Provides access to all game screens and functions.
+ * A plain list of every screen and function, for when you can't remember
+ * the icon or the shortcut.
  */
 #define PAUSE_ITEMS 14
-static const char *pause_menu_labels[PAUSE_ITEMS] = {
+static char *pause_menu_labels[PAUSE_ITEMS] = {
 	"Resume",
 	"Galactic Chart",
 	"Short Range Chart",
-	"Planet Data",
+	"Data on System",
 	"Market Prices",
 	"Commander Status",
 	"Inventory",
@@ -110,160 +160,163 @@ static const char *pause_menu_labels[PAUSE_ITEMS] = {
 	"Quit Game",
 };
 
+#define PAUSE_TOP_Y		52
+#define PAUSE_STEP_Y	20
+
+static void draw_pause_item(int i, int selected)
+{
+	int y = PAUSE_TOP_Y + i * PAUSE_STEP_Y;
+
+	gfx_clear_area(96, y - 1, 416, y + 15);
+	if (selected)
+		gfx_draw_rectangle(96, y - 1, 416, y + 15, GFX_COL_DARK_RED);
+	gfx_display_colour_text(160, y, pause_menu_labels[i],
+							selected ? GFX_COL_WHITE : GFX_COL_GREY_1);
+}
+
 static void run_pause_menu(void)
 {
+	int resume_screen = current_screen;
 	int selection = 0;
-	int done = 0;
+	int choice = -1;
+	int i;
 
-	while (!done)
+	game_paused = 0;
+	find_input = 0;
+
+	current_screen = SCR_PAUSE_MENU;
+	gfx_clear_display();
+	gfx_clear_area(0, ICON_BAR_TEXT_Y, 511, N64_SCREEN_H - 1);
+
+	gfx_display_centre_text(10, "PAUSED", 140, GFX_COL_GOLD);
+	gfx_draw_line(0, 36, 511, 36);
+	for (i = 0; i < PAUSE_ITEMS; i++)
+		draw_pause_item(i, i == selection);
+	gfx_display_centre_text(350, "D-Pad: Select    A: Confirm    Start: Resume", 120, GFX_COL_GREY_1);
+
+	while (choice < 0)
 	{
-		int i;
-		int menu_x = 120;
-		int menu_y = 60;
+		joypad_buttons_t pressed;
+		int old = selection;
 
-		gfx_acquire_screen();
-		/* Draw semi-transparent overlay by darkening the view area */
-		gfx_clear_area(50, 40, 460, 340);
-		gfx_draw_colour_line(50, 40, 460, 40, GFX_COL_WHITE);
-		gfx_draw_colour_line(50, 340, 460, 340, GFX_COL_WHITE);
-		gfx_draw_colour_line(50, 40, 50, 340, GFX_COL_WHITE);
-		gfx_draw_colour_line(460, 40, 460, 340, GFX_COL_WHITE);
-
-		gfx_display_centre_text(46, "- PAUSED -", 140, GFX_COL_GOLD);
-
-		for (i = 0; i < PAUSE_ITEMS; i++)
-		{
-			int col = (i == selection) ? GFX_COL_WHITE : GFX_COL_GREY_1;
-			int y = menu_y + i * 20;
-
-			if (i == selection)
-				gfx_draw_rectangle(55, y - 1, 455, y + 15, GFX_COL_BLUE_4);
-
-			gfx_display_colour_text(menu_x, y, (char *)pause_menu_labels[i], col);
-		}
-
-		/* Control hints at bottom */
-		gfx_display_colour_text(60, 350, "D-Pad:Select  A:Confirm  Start:Resume", GFX_COL_GREY_1);
-
-		gfx_release_screen();
 		gfx_update_screen();
 
-		/* Use edge-triggered input for menu navigation (not held state)
-		 * to prevent the menu from scrolling too fast. */
 		joypad_poll();
-		{
-			joypad_buttons_t pressed = joypad_get_buttons_pressed(JOYPAD_PORT_1);
+		pressed = joypad_get_buttons_pressed(JOYPAD_PORT_1);
 
-			if (pressed.d_up)
-			{
-				selection--;
-				if (selection < 0) selection = PAUSE_ITEMS - 1;
-			}
-			if (pressed.d_down)
-			{
-				selection++;
-				if (selection >= PAUSE_ITEMS) selection = 0;
-			}
+		if (pressed.d_up)
+			selection = (selection + PAUSE_ITEMS - 1) % PAUSE_ITEMS;
+		if (pressed.d_down)
+			selection = (selection + 1) % PAUSE_ITEMS;
 
-			if (pressed.start) /* Start pressed again = resume */
-			{
-				done = 1;
-			}
-			else if (pressed.a) /* A button = confirm */
+		if (selection != old)
 		{
-			switch (selection)
-			{
-				case 0:  /* Resume */
-					done = 1;
-					break;
-				case 1:  /* Galactic Chart */
-					done = 1; game_paused = 0;
-					old_cross_x = -1;
-					display_galactic_chart();
-					return;
-				case 2:  /* Short Range Chart */
-					done = 1; game_paused = 0;
-					old_cross_x = -1;
-					display_short_range_chart();
-					return;
-				case 3:  /* Planet Data */
-					done = 1; game_paused = 0;
-					display_data_on_planet();
-					return;
-				case 4:  /* Market Prices */
-					done = 1; game_paused = 0;
-					if (!witchspace) display_market_prices();
-					return;
-				case 5:  /* Commander Status */
-					done = 1; game_paused = 0;
-					display_commander_status();
-					return;
-				case 6:  /* Inventory */
-					done = 1; game_paused = 0;
-					display_inventory();
-					return;
-				case 7:  /* Equip Ship */
-					done = 1; game_paused = 0;
-					if (docked)
-						equip_ship();
-					else
-						info_message("Must be docked to equip");
-					return;
-				case 8:  /* Options */
-					done = 1; game_paused = 0;
-					display_options();
-					return;
-				case 9:  /* Hyperspace */
-					done = 1; game_paused = 0;
-					if (!docked)
-						start_hyperspace();
-					return;
-				case 10: /* Docking Computer */
-					done = 1; game_paused = 0;
-					if (!docked && cmdr.docking_computer)
-					{
-						if ((universe[1].type == SHIP_CORIOLIS ||
-						     universe[1].type == SHIP_DODEC) &&
-						    (universe[1].flags & FLG_ANGRY))
-							info_message("Docking permission refused");
-						else if (instant_dock)
-							engage_docking_computer();
-						else
-							engage_auto_pilot();
-					}
-					else if (docked)
-						info_message("Already docked");
-					else
-						info_message("Docking computer not fitted");
-					return;
-				case 11: /* Find Planet */
-					done = 1; game_paused = 0;
-					/* Navigate to galactic chart first, then activate find */
-					old_cross_x = -1;
-					display_galactic_chart();
-					find_input = 1;
-					*find_name = '\0';
-					gfx_clear_text_area();
-					gfx_display_text(16, 340, "Planet Name?");
-					return;
-				case 12: /* Save Commander */
-					done = 1; game_paused = 0;
-					if (docked)
-						save_commander_screen();
-					else
-						info_message("Must be docked to save");
-					return;
-				case 13: /* Quit Game */
-					done = 1; game_paused = 0;
-					quit_screen();
-					return;
-			}
+			draw_pause_item(old, 0);
+			draw_pause_item(selection, 1);
 		}
-	} /* end joypad pressed block */
+
+		if (pressed.start || pressed.b)
+			choice = 0;
+		else if (pressed.a)
+			choice = selection;
 	}
-	/* No screen redraw needed here */
+
+	/* Put back the screen we came from; the choice may then replace it. */
+	current_screen = resume_screen;
+	redraw_current_screen();
 	frame_count = 0;
-	game_paused = 0;
+
+	switch (choice)
+	{
+		case 1:
+			old_cross_x = -1;
+			display_galactic_chart();
+			break;
+		case 2:
+			old_cross_x = -1;
+			display_short_range_chart();
+			break;
+		case 3:
+			display_data_on_planet();
+			break;
+		case 4:
+			if (!witchspace)
+				display_market_prices();
+			break;
+		case 5:
+			display_commander_status();
+			break;
+		case 6:
+			display_inventory();
+			break;
+		case 7:
+			if (docked)
+				equip_ship();
+			else
+				info_message("Must be docked to equip");
+			break;
+		case 8:
+			display_options();
+			break;
+		case 9:
+			if (docked)
+				info_message("Launch first");
+			else
+				start_hyperspace();
+			break;
+		case 10:
+			request_docking_computer();
+			break;
+		case 11:
+			start_find_planet();
+			break;
+		case 12:
+			if (docked)
+				save_commander_screen();
+			else
+				info_message("Must be docked to save");
+			break;
+		case 13:
+			quit_screen();
+			break;
+	}
+}
+
+
+/*
+ * Draw the current screen again from scratch (after the pause menu has
+ * been drawn over it). The space views redraw themselves every frame.
+ */
+static void redraw_current_screen(void)
+{
+	switch (current_screen)
+	{
+		case SCR_GALACTIC_CHART:
+		case SCR_SHORT_RANGE:
+		{
+			int cx = cross_x, cy = cross_y;
+			if (current_screen == SCR_GALACTIC_CHART)
+				display_galactic_chart();
+			else
+				display_short_range_chart();
+			cross_x = cx;
+			cross_y = cy;
+			old_cross_x = -1;
+			break;
+		}
+		case SCR_PLANET_DATA:	display_data_on_planet(); break;
+		case SCR_MARKET_PRICES:	display_market_prices(); break;
+		case SCR_CMDR_STATUS:	display_commander_status(); break;
+		case SCR_INVENTORY:		display_inventory(); break;
+		case SCR_EQUIP_SHIP:	equip_ship(); break;
+		case SCR_OPTIONS:		display_options(); break;
+		case SCR_SETTINGS:		game_settings_screen(); break;
+		case SCR_QUIT:			quit_screen(); break;
+		case SCR_RESTART:		restart_screen(); break;
+		case SCR_SAVE_CMDR:
+		case SCR_LOAD_CMDR:		display_options(); break;
+		default:				gfx_clear_display(); break;
+	}
 }
 
 
@@ -411,22 +464,22 @@ void draw_laser_sights(void)
 	if (laser)
 	{
 		x1 = 128 * GFX_SCALE;
-		y1 = (96-8) * GFX_SCALE;
-		y2 = (96-16) * GFX_SCALE;
+		y1 = (GFX_VIEW_CY-8) * GFX_SCALE;
+		y2 = (GFX_VIEW_CY-16) * GFX_SCALE;
 
 		gfx_draw_colour_line(x1-1, y1, x1-1, y2, GFX_COL_GREY_1);
 		gfx_draw_colour_line(x1, y1, x1, y2, GFX_COL_WHITE);
 		gfx_draw_colour_line(x1+1, y1, x1+1, y2, GFX_COL_GREY_1);
 
-		y1 = (96+8) * GFX_SCALE;
-		y2 = (96+16) * GFX_SCALE;
+		y1 = (GFX_VIEW_CY+8) * GFX_SCALE;
+		y2 = (GFX_VIEW_CY+16) * GFX_SCALE;
 
 		gfx_draw_colour_line(x1-1, y1, x1-1, y2, GFX_COL_GREY_1);
 		gfx_draw_colour_line(x1, y1, x1, y2, GFX_COL_WHITE);
 		gfx_draw_colour_line(x1+1, y1, x1+1, y2, GFX_COL_GREY_1);
 
 		x1 = (128-8) * GFX_SCALE;
-		y1 = 96 * GFX_SCALE;
+		y1 = GFX_VIEW_CY * GFX_SCALE;
 		x2 = (128-16) * GFX_SCALE;
 
 		gfx_draw_colour_line(x1, y1-1, x2, y1-1, GFX_COL_GREY_1);
@@ -449,96 +502,81 @@ static void climb(void);
 static void dive(void);
 
 /*
- * NES-style icon bar: process navigation and activation.
- * Called every frame from handle_flight_keys.
+ * NES-style icon bar: move the pointer and carry out the selected button.
+ * Called every frame from handle_flight_keys, on every screen.
  */
 static void process_icon_bar(void)
 {
-	const int *funcs;
 	int func;
 
-	/* Navigate icon bar cursor */
 	if (kbd_icon_left_pressed)
-	{
-		icon_bar_cursor--;
-		if (icon_bar_cursor < 0) icon_bar_cursor = 11;
-	}
+		icon_bar_cursor = (icon_bar_cursor + 11) % 12;
 	if (kbd_icon_right_pressed)
-	{
-		icon_bar_cursor++;
-		if (icon_bar_cursor > 11) icon_bar_cursor = 0;
-	}
+		icon_bar_cursor = (icon_bar_cursor + 1) % 12;
 
-	/* Activate selected icon */
 	if (!kbd_icon_activate_pressed)
 		return;
 
-	/* Select function table based on context */
-	if (docked)
-		funcs = icon_funcs_docked;
-	else if (current_screen == SCR_GALACTIC_CHART || current_screen == SCR_SHORT_RANGE)
-		funcs = icon_funcs_charts;
-	else
-		funcs = icon_funcs_flight;
+	func = icon_funcs[icon_bar_type][icon_bar_cursor];
 
-	func = funcs[icon_bar_cursor];
-	if (func == 0)
-		return;
-
-	/* NES TT102 dispatch - map function numbers to game actions */
+	/* The NES button numbers (see the TT102 routine in the NES source). */
 	switch (func)
 	{
 		case 1:  /* Launch */
-			kbd_F1_pressed = 1;
+			if (docked)
+				kbd_F1_pressed = 1;
 			break;
 		case 2:  /* Market Prices */
 			kbd_F8_pressed = 1;
 			break;
-		case 3:  /* Commander Status */
+		case 3:  /* Status Mode */
 			kbd_F9_pressed = 1;
 			break;
-		case 4:  /* Charts (toggle long/short) */
-			kbd_F5_pressed = 1;
+		case 4:  /* Charts */
+			kbd_F6_pressed = 1;
 			break;
 		case 5:  /* Equip Ship */
-			kbd_F4_pressed = 1;
-			break;
-		case 6:  /* Save/Load */
 			if (docked)
-			{
-				extern void save_commander_screen(void);
-				save_commander_screen();
-			}
+				kbd_F4_pressed = 1;
+			break;
+		case 6:  /* Save and Load */
+			if (docked)
+				kbd_F11_pressed = 1;
 			break;
 		case 8:  /* Inventory */
 			kbd_F10_pressed = 1;
 			break;
-		case 12: /* Fast-forward / In-system jump */
+		case 12: /* Fast-forward: the in-system jump */
 			kbd_jump_pressed = 1;
 			break;
 		case 17: /* Docking Computer */
-			kbd_dock_pressed = 1;
+			request_docking_computer();
 			break;
-		case 21: /* Front Space View (cycle views) */
+		case 21: /* Front Space View, then rear, left and right */
+			if (docked)
+				break;
 			if (current_screen == SCR_FRONT_VIEW)
-				kbd_F4_pressed = 1;  /* cycle to right view */
-			else if (current_screen == SCR_RIGHT_VIEW)
-				kbd_F2_pressed = 1;  /* cycle to rear */
+				kbd_F2_pressed = 1;
 			else if (current_screen == SCR_REAR_VIEW)
-				kbd_F3_pressed = 1;  /* cycle to left */
+				kbd_F3_pressed = 1;
+			else if (current_screen == SCR_LEFT_VIEW)
+				kbd_F4_pressed = 1;
 			else
-				kbd_F1_pressed = 1;  /* go to front */
+				kbd_F1_pressed = 1;
 			break;
 		case 22: /* Hyperspace */
 			kbd_hyperspace_pressed = 1;
 			break;
-		case 23: /* ECM */
+		case 23: /* E.C.M. */
 			kbd_ecm_pressed = 1;
 			break;
-		case 24: /* Target Missile */
-			kbd_target_missile_pressed = 1;
+		case 24: /* Target Missile (or stand it down again) */
+			if (missile_target == MISSILE_UNARMED)
+				kbd_target_missile_pressed = 1;
+			else
+				kbd_unarm_missile_pressed = 1;
 			break;
-		case 25: /* Fire Missile */
+		case 25: /* Fire Targeted Missile */
 			kbd_fire_missile_pressed = 1;
 			break;
 		case 26: /* Energy Bomb */
@@ -558,10 +596,10 @@ static void process_icon_bar(void)
 			else
 				kbd_F5_pressed = 1;
 			break;
-		case 38: /* Return to Current System */
+		case 38: /* Return Pointer to Current System */
 			kbd_origin_pressed = 1;
 			break;
-		case 39: /* Find System */
+		case 39: /* Search for System */
 			kbd_find_pressed = 1;
 			break;
 		case 41: /* Galactic Hyperspace */
@@ -573,62 +611,41 @@ static void process_icon_bar(void)
 
 
 /*
- * Apply analog joystick to flight roll/climb.
- * Maps the joystick range to the flight_roll/climb range.
+ * Apply the analog stick and the C-buttons to roll and pitch.
  *
- * Sign conventions (matching original Elite):
- *   flight_roll > 0 = rolling left  (roll_left increases it)
- *   flight_roll < 0 = rolling right (roll_right decreases it)
- *   flight_climb > 0 = climbing (nose up)
- *   flight_climb < 0 = diving  (nose down)
- *
- * Joystick convention (inverted Y for flight sim feel):
- *   stick right → roll right → flight_roll NEGATIVE (invert stick_x)
- *   stick up    → dive       → flight_climb NEGATIVE (invert stick_y)
+ * Sign conventions (as in the original): flight_roll > 0 rolls left,
+ * flight_climb > 0 climbs. The stick works like a flight stick: push
+ * forward to dive, pull back to climb.
  */
 static void process_analog_flight(void)
 {
-	if (docked || game_paused)
+	if (docked || !is_space_view())
 		return;
 
-	/* Analog roll: stick right → roll right → negative flight_roll */
 	if (joy_roll != 0)
 	{
-		int target = -(joy_roll * myship.max_roll) / 127;
-		flight_roll = target;
+		flight_roll = -(joy_roll * myship.max_roll) / 80;
+		if (flight_roll > myship.max_roll) flight_roll = myship.max_roll;
+		if (flight_roll < -myship.max_roll) flight_roll = -myship.max_roll;
 		rolling = 1;
 	}
 
-	/* Analog pitch: stick up → dive → negative flight_climb.
-	 * joy_pitch is already -stick_y, so positive joy_pitch = climb. */
 	if (joy_pitch != 0)
 	{
-		int target = (joy_pitch * myship.max_climb) / 127;
-		flight_climb = target;
+		flight_climb = (joy_pitch * myship.max_climb) / 80;
+		if (flight_climb > myship.max_climb) flight_climb = myship.max_climb;
+		if (flight_climb < -myship.max_climb) flight_climb = -myship.max_climb;
 		climbing = 1;
 	}
 
-	/* Digital pitch/roll from C-buttons (strafing) */
-	if (kbd_climb_pressed)
-	{
-		dive();     /* C-Up = nose down = dive */
-		climbing = 1;
-	}
-	if (kbd_dive_pressed)
-	{
-		climb();    /* C-Down = nose up = climb */
-		climbing = 1;
-	}
+	if (kbd_climb_pressed)		/* C-Up: nose down */
+		dive();
+	if (kbd_dive_pressed)		/* C-Down: nose up */
+		climb();
 	if (kbd_roll_left_pressed)
-	{
 		roll_left();
-		rolling = 1;
-	}
 	if (kbd_roll_right_pressed)
-	{
 		roll_right();
-		rolling = 1;
-	}
 }
 
 
@@ -894,50 +911,53 @@ void d_pressed(void)
 }
 
 
+/* Planet finder: the name is built one letter at a time. */
+static int find_letter;
+
+static void show_find_prompt(void)
+{
+	char str[48];
+
+	sprintf(str, "Planet Name? %s%c", find_name, 'A' + find_letter);
+	gfx_clear_text_area();
+	gfx_display_text(16, 340, str);
+	gfx_display_colour_text(16, 356, "Up/Down:letter  Right:next  A:search  B:delete", GFX_COL_GREY_1);
+}
+
 void f_pressed(void)
 {
-	if ((current_screen == SCR_GALACTIC_CHART) ||
-		(current_screen == SCR_SHORT_RANGE))
+	if (is_chart())
 	{
 		find_input = 1;
+		find_letter = 0;
 		*find_name = '\0';
-		gfx_clear_text_area();
-		gfx_display_text(16, 340, "Planet Name?");
+		show_find_prompt();
 	}
 }
 
 
 void add_find_char(int letter)
 {
-	char str[40];
+	int len = strlen(find_name);
 
-	if (strlen(find_name) == 16)
+	if (len >= 16)
 		return;
 
-	str[0] = toupper(letter);
-	str[1] = '\0';
-	strcat(find_name, str);
-
-	sprintf(str, "Planet Name? %s", find_name);
-	gfx_clear_text_area();
-	gfx_display_text(16, 340, str);
+	find_name[len] = toupper(letter);
+	find_name[len + 1] = '\0';
+	show_find_prompt();
 }
 
 
 void delete_find_char(void)
 {
-	char str[40];
-	int len;
+	int len = strlen(find_name);
 
-	len = strlen(find_name);
 	if (len == 0)
 		return;
 
 	find_name[len - 1] = '\0';
-
-	sprintf(str, "Planet Name? %s", find_name);
-	gfx_clear_text_area();
-	gfx_display_text(16, 340, str);
+	show_find_prompt();
 }
 
 void o_pressed()
@@ -1047,6 +1067,10 @@ void run_escape_sequence(void)
 	set_init_matrix(rotmat);
 	rotmat[2].z = 1.0;
 
+	/* This loop simulates on every frame, whatever the main loop was doing. */
+	universe_render_only = 0;
+	star_delta_scale = 1.0;
+
 	newship = add_new_ship(SHIP_COBRA3, 0, 0, 200, rotmat, -127, -127);
 	universe[newship].velocity = 7;
 	snd_play_sample(SND_LAUNCH);
@@ -1068,7 +1092,7 @@ void run_escape_sequence(void)
 		universe[newship].location.y = 0;
 		universe[newship].location.z += 2;
 
-		gfx_display_centre_text(358, "Escape pod launched - Ship auto-destuct initiated.", 120, GFX_COL_WHITE);
+		gfx_display_centre_text(GFX_MESSAGE_Y, "Escape pod launched - Ship auto-destuct initiated.", 120, GFX_COL_WHITE);
 
 		update_console();
 		gfx_update_screen();
@@ -1100,34 +1124,18 @@ void run_escape_sequence(void)
 	abandon_ship();
 }
 
-static int cheat_arg __attribute__((unused)) = 0;
-
 void handle_flight_keys(void)
 {
-	int keyasc;
-
-	if (docked &&
-		((current_screen == SCR_MARKET_PRICES) ||
-		 (current_screen == SCR_OPTIONS) ||
-		 (current_screen == SCR_SETTINGS) ||
-		 (current_screen == SCR_EQUIP_SHIP)))
-		kbd_read_key();
-
 	kbd_poll_keyboard();
 
-	if (game_paused)
+	update_icon_bar_type();
+
+	if (kbd_pause_pressed)
 	{
 		run_pause_menu();
+		update_icon_bar_type();
 		return;
 	}
-
-	/* Update icon bar type based on context */
-	if (docked)
-		icon_bar_type = 0;
-	else if (current_screen == SCR_GALACTIC_CHART || current_screen == SCR_SHORT_RANGE)
-		icon_bar_type = 2;
-	else
-		icon_bar_type = 1;
 
 	/* NES-style icon bar navigation and activation */
 	process_icon_bar();
@@ -1241,89 +1249,64 @@ void handle_flight_keys(void)
 
 	if (find_input)
 	{
-#ifdef PLATFORM_N64
-		/* N64 virtual keyboard: D-pad Up/Down cycles letters, A confirms, B deletes/cancels */
-		static int find_letter = 0; /* 0-25 = A-Z */
-
-		if (kbd_up_pressed)
+		/* Up/Down picks a letter, Right keeps it, A searches, B deletes
+		 * (or cancels when the name is empty). */
+		if (!is_chart())
 		{
-			find_letter = (find_letter + 1) % 26;
-			/* Show preview of next letter */
-			{
-				char str[40];
-				sprintf(str, "Planet Name? %s%c", find_name, 'A' + find_letter);
-				gfx_clear_text_area();
-				gfx_display_text(16, 340, str);
-			}
-			return;
-		}
-
-		if (kbd_down_pressed)
-		{
-			find_letter = (find_letter + 25) % 26;
-			{
-				char str[40];
-				sprintf(str, "Planet Name? %s%c", find_name, 'A' + find_letter);
-				gfx_clear_text_area();
-				gfx_display_text(16, 340, str);
-			}
-			return;
-		}
-
-		if (kbd_right_pressed)
-		{
-			/* Right = add current letter */
-			add_find_char('A' + find_letter);
-			find_letter = 0;
-			return;
-		}
-
-		if (kbd_enter_pressed)
-		{
-			/* A = search */
 			find_input = 0;
-			find_planet_by_name(find_name);
-			return;
 		}
-
-		if (kbd_backspace_pressed)
+		else
 		{
-			if (strlen(find_name) > 0)
-				delete_find_char();
-			else
+			if (kbd_up_pressed)
 			{
+				find_letter = (find_letter + 1) % 26;
+				show_find_prompt();
+			}
+			else if (kbd_down_pressed)
+			{
+				find_letter = (find_letter + 25) % 26;
+				show_find_prompt();
+			}
+			else if (kbd_right_pressed)
+			{
+				add_find_char('A' + find_letter);
+			}
+			else if (kbd_enter_pressed)
+			{
+				/* The letter on show counts as part of the name. */
+				add_find_char('A' + find_letter);
 				find_input = 0;
-				gfx_clear_text_area();
+				find_planet_by_name(find_name);
+			}
+			else if (kbd_backspace_pressed)
+			{
+				if (strlen(find_name) > 0)
+					delete_find_char();
+				else
+				{
+					find_input = 0;
+					gfx_clear_text_area();
+					show_distance_to_planet();
+				}
 			}
 			return;
 		}
-#else
-		keyasc = kbd_read_key();
-
-		if (kbd_enter_pressed)
-		{
-			find_input = 0;
-			find_planet_by_name(find_name);
-			return;
-		}
-
-		if (kbd_backspace_pressed)
-		{
-			delete_find_char();
-			return;
-		}
-
-		if (isalpha(keyasc))
-			add_find_char(keyasc);
-#endif
-		return;
 	}
 
 	if (kbd_y_pressed)
 		y_pressed();
 
 	if (kbd_n_pressed)
-		n_pressed();
+	{
+		if (!docked && !is_space_view() &&
+			current_screen != SCR_QUIT && current_screen != SCR_RESTART)
+		{
+			current_screen = SCR_FRONT_VIEW;
+			flip_stars();
+		}
+		else
+			n_pressed();
+	}
 
 #ifdef HACKING
 	if (kbd_i_pressed == 1)
@@ -1339,19 +1322,7 @@ void handle_flight_keys(void)
 	}
 
 	if (kbd_dock_pressed)
-	{
-		if (!docked && cmdr.docking_computer)
-		{
-			if ((universe[1].type == SHIP_CORIOLIS ||
-			     universe[1].type == SHIP_DODEC) &&
-			    (universe[1].flags & FLG_ANGRY))
-				info_message("Docking permission refused");
-			else if (instant_dock)
-				engage_docking_computer();
-			else
-				engage_auto_pilot();
-		}
-	}
+		request_docking_computer();
 
 	if (kbd_d_pressed)
 		d_pressed();
@@ -1386,24 +1357,6 @@ void handle_flight_keys(void)
 
 	if (kbd_origin_pressed)
 		o_pressed();
-
-	if (kbd_pause_pressed) {
-		/* Only open pause menu from flight views - not from submenus/screens
-		 * that were navigated to FROM the pause menu. Opening the pause menu
-		 * on top of other screens creates nested state and crashes. */
-		if (current_screen == SCR_FRONT_VIEW || current_screen == SCR_REAR_VIEW ||
-			current_screen == SCR_LEFT_VIEW || current_screen == SCR_RIGHT_VIEW)
-		{
-			cheat_arg = 0;
-			game_paused = 1;
-		}
-		else
-		{
-			/* From non-flight screens, Start returns to front view */
-			current_screen = SCR_FRONT_VIEW;
-			old_cross_x = -1;
-		}
-	}
 
 	if (kbd_target_missile_pressed)
 	{
@@ -1505,7 +1458,7 @@ void save_commander_screen(void)
 	gfx_draw_line(0, 36, 511, 36);
 	gfx_update_screen();
 
-	/* On N64, save to SRAM directly (single save slot) */
+	/* On N64 there is a single save slot in the cartridge EEPROM. */
 	rv = save_commander_file(cmdr.name);
 
 	if (rv)
@@ -1533,7 +1486,7 @@ void load_commander_screen(void)
 	gfx_draw_line(0, 36, 511, 36);
 	gfx_update_screen();
 
-	/* On N64, load from SRAM directly */
+	/* On N64 there is a single save slot in the cartridge EEPROM. */
 	rv = load_commander_file("jameson");
 
 	if (rv)
@@ -1546,8 +1499,10 @@ void load_commander_screen(void)
 		/* Wait for button press */
 		for (;;)
 		{
+			joypad_buttons_t btns;
+			gfx_update_screen();
 			joypad_poll();
-			joypad_buttons_t btns = joypad_get_buttons_pressed(JOYPAD_PORT_1);
+			btns = joypad_get_buttons_pressed(JOYPAD_PORT_1);
 			if (btns.a || btns.b || btns.start)
 				break;
 		}
@@ -1557,17 +1512,16 @@ void load_commander_screen(void)
 	restore_saved_commander();
 	set_commander_name("JAMESON");
 	saved_cmdr = cmdr;
-	/* Don't call update_console() here - it draws the scanner BMP
-	 * which would leak into the intro screen. */
 }
 
+
+extern int n64_save_exists(void);
 
 void run_first_intro_screen(void)
 {
 	current_screen = SCR_INTRO_ONE;
-
-	/* Clear scanner area so dashboard doesn't leak into intro screen */
-	gfx_clear_area(0, SCANNER_Y, 511, N64_SCREEN_H - 1);
+	universe_render_only = 0;
+	star_delta_scale = 1.0;
 
 	snd_play_midi(SND_ELITE_THEME, 1);
 
@@ -1584,19 +1538,17 @@ void run_first_intro_screen(void)
 
 		kbd_poll_keyboard();
 
-		if (kbd_y_pressed)
+		/* A loads the saved commander (if there is one); B or Start
+		 * begins with a new Commander Jameson. */
+		if (kbd_y_pressed && n64_save_exists())
 		{
-			/* Only allow load if a save exists */
-			extern int n64_save_exists(void);
-			if (n64_save_exists())
-			{
-				snd_stop_midi();
-				load_commander_screen();
-				break;
-			}
+			snd_stop_midi();
+			load_commander_screen();
+			break;
 		}
 
-		if (kbd_n_pressed)
+		if (kbd_n_pressed || kbd_space_pressed ||
+			(kbd_y_pressed && !n64_save_exists()))
 		{
 			snd_stop_midi();
 			break;
@@ -1608,6 +1560,8 @@ void run_first_intro_screen(void)
 void run_second_intro_screen(void)
 {
 	current_screen = SCR_INTRO_TWO;
+	universe_render_only = 0;
+	star_delta_scale = 1.0;
 
 	snd_play_midi(SND_BLUE_DANUBE, 1);
 
@@ -1648,7 +1602,8 @@ void run_game_over_screen()
 	int type;
 
 	current_screen = SCR_GAME_OVER;
-	gfx_set_clip_region(1, 1, 510, GFX_VIEW_BY);
+	universe_render_only = 0;
+	star_delta_scale = 1.0;
 
 	flight_speed = 6;
 	flight_roll = 0;
@@ -1677,9 +1632,11 @@ void run_game_over_screen()
 	for (i = 0; i < 100; i++)
 	{
 		gfx_clear_display();
+		gfx_set_clip_region(1, 1, 510, GFX_VIEW_BY);
 		update_starfield();
 		update_universe();
-		gfx_display_centre_text(190, "GAME OVER", 140, GFX_COL_GOLD);
+		gfx_display_centre_text(GFX_Y_CENTRE - 8, "GAME OVER", 140, GFX_COL_GOLD);
+		update_console();
 		gfx_update_screen();
 	}
 }
@@ -1693,23 +1650,27 @@ void display_break_pattern(void)
 {
 	int i;
 
-	gfx_set_clip_region(1, 1, 510, GFX_VIEW_BY);
 	gfx_clear_display();
+	gfx_set_clip_region(1, 1, 510, GFX_VIEW_BY);
+	update_console();
 
 	for (i = 0; i < 20; i++)
 	{
-		gfx_draw_circle(256, 192, 30 + i * 15, GFX_COL_WHITE);
+		gfx_set_clip_region(1, 1, 510, GFX_VIEW_BY);
+		gfx_draw_circle(256, GFX_Y_CENTRE, 30 + i * 15, GFX_COL_WHITE);
 		gfx_update_screen();
 	}
 
 	if (docked)
 	{
 		check_mission_brief();
+		update_condition();
 		display_commander_status();
-		update_console();
 	}
 	else
 		current_screen = SCR_FRONT_VIEW;
+
+	frame_count = 0;
 }
 
 
@@ -1746,9 +1707,6 @@ static void initialise_n64(void)
 }
 
 
-/* Widescreen mode flag */
-int n64_widescreen = 0;
-
 
 int main(void)
 {
@@ -1775,8 +1733,6 @@ int main(void)
 		initialise_game();
 		dock_player();
 
-		/* Don't draw console here - it would appear on intro screens */
-
 		current_screen = SCR_FRONT_VIEW;
 		run_first_intro_screen();
 		run_second_intro_screen();
@@ -1790,60 +1746,52 @@ int main(void)
 		while (!game_over)
 		{
 			/*
-			 * 60fps game loop: render EVERY vsync frame, simulate every Nth.
-			 * gfx_update_screen() shows and immediately acquires the next
-			 * buffer (RDP-cleared to black), so active_fb is always valid.
-			 *
-			 * SIM_RATE=3 → simulation at ~20fps, rendering+starfield at ~60fps.
+			 * One pass = one displayed frame. The simulation runs at the
+			 * original game speed (one step every speed_cap milliseconds,
+			 * counted by the frame timer); frames in between only redraw,
+			 * which keeps the stars and the controls smooth.
 			 */
-			#define SIM_RATE 3
-			static int sim_counter = 0;
+			static long long last_frame_ticks = 0;
+			long long now_ticks;
 			int do_sim;
+			int space_view;
 
-			snd_update_sound();
+			/* The space views are redrawn in full every frame, so they can
+			 * be drawn straight into the display buffer. */
+			if (!docked && is_space_view())
+				gfx_request_direct_frame();
 			gfx_update_screen();
 
 			do_sim = (frame_count >= 1);
 			if (do_sim)
-			{
 				frame_count = 0;
-				sim_counter = 0;
-			}
-			else
-			{
-				sim_counter++;
-				if (sim_counter >= SIM_RATE)
-					sim_counter = 0;
-			}
 
 			/* ===== INPUT PHASE (every frame for responsive controls) ===== */
 			gfx_set_clip_region(1, 1, 510, GFX_VIEW_BY);
 			rolling = 0;
 			climbing = 0;
 			handle_flight_keys();
+			update_icon_bar_type();
+
+			if (game_over)
+				break;
 
 			/* ===== SIMULATION PHASE (only on sim ticks) ===== */
 			if (do_sim)
 			{
 				snd_tick_cooldowns();
 
-				if (!game_paused)
+				if (message_count > 0)
+					message_count--;
+
+				if (!docked && auto_pilot)
 				{
-					if (message_count > 0)
-						message_count--;
-
-					if (!docked && auto_pilot)
-					{
-						auto_dock();
-						if ((mcount & 127) == 0)
-							info_message("Docking Computers On");
-					}
+					auto_dock();
+					if ((mcount & 127) == 0)
+						info_message("Docking Computers On");
 				}
-			}
 
-			/* Roll/climb decay on sim ticks only (same rate as original) */
-			if (do_sim && !game_paused)
-			{
+				/* Roll and pitch settle back to level when not being steered */
 				if (!rolling)
 				{
 					if (flight_roll > 0) decrease_flight_roll();
@@ -1859,116 +1807,151 @@ int main(void)
 
 			/* ===== RENDER PHASE ===== */
 
-			/* Smooth starfield: 1/SIM_RATE step on every frame */
-			star_delta_scale = 1.0 / SIM_RATE;
+			/* Move the stars by the fraction of a simulation step that
+			 * really passed since the last frame. */
+			now_ticks = timer_ticks();
+			star_delta_scale = 1.0;
+			if (last_frame_ticks != 0 && speed_cap > 0)
+			{
+				star_delta_scale = (double)TIMER_MICROS_LL(now_ticks - last_frame_ticks) /
+								   (speed_cap * 1000.0);
+				if (star_delta_scale > 1.5) star_delta_scale = 1.5;
+				if (star_delta_scale < 0.0) star_delta_scale = 0.0;
+			}
+			last_frame_ticks = now_ticks;
+
 			universe_render_only = !do_sim;
+			space_view = is_space_view();
 
 			if (!docked)
 			{
-				gfx_set_clip_region(1, 1, 510, GFX_VIEW_BY);
-
-				if ((current_screen == SCR_FRONT_VIEW) || (current_screen == SCR_REAR_VIEW) ||
-					(current_screen == SCR_LEFT_VIEW) || (current_screen == SCR_RIGHT_VIEW) ||
-					(current_screen == SCR_INTRO_ONE) || (current_screen == SCR_INTRO_TWO) ||
-					(current_screen == SCR_GAME_OVER))
+				if (space_view)
 				{
 					gfx_clear_display();
+					gfx_set_clip_region(1, 1, 510, GFX_VIEW_BY);
 					update_starfield();
 				}
 
+				/* On the text screens the universe still moves, but it is
+				 * drawn clipped away to nothing. */
+				if (!space_view)
+					gfx_set_clip_region(0, 0, -1, -1);
 				update_universe();
+				gfx_set_clip_region(1, 1, 510, GFX_VIEW_BY);
 
-				if (docked)
+				if (!docked)
 				{
-					update_console();
-					continue;
-				}
+					space_view = is_space_view();
 
-				if ((current_screen == SCR_FRONT_VIEW) || (current_screen == SCR_REAR_VIEW) ||
-					(current_screen == SCR_LEFT_VIEW) || (current_screen == SCR_RIGHT_VIEW))
-				{
-					if (draw_lasers)
+					if (space_view)
 					{
-						draw_laser_lines();
-						if (do_sim) draw_lasers--;
-					}
-					draw_laser_sights();
-				}
-
-				if (message_count > 0)
-					gfx_display_centre_text(358, message_string, 120, GFX_COL_WHITE);
-
-				if (hyper_ready)
-				{
-					display_hyper_status();
-					if (do_sim && (mcount & 3) == 0)
-						countdown_hyperspace();
-				}
-
-				if (do_sim)
-				{
-					mcount--;
-					if (mcount < 0) mcount = 255;
-
-					if ((mcount & 7) == 0) regenerate_shields();
-
-					if ((mcount & 31) == 10)
-					{
-						if (energy < 50)
+						if (draw_lasers)
 						{
-							info_message("ENERGY LOW");
-							snd_play_sample(SND_BEEP);
+							draw_laser_lines();
+							if (do_sim) draw_lasers--;
 						}
-						update_altitude();
+						draw_laser_sights();
+
+						if (message_count > 0)
+						{
+							/* A black strip keeps it readable over planets and suns. */
+							int half = strlen(message_string) * 4 + 6;
+							gfx_clear_area(256 - half, GFX_MESSAGE_Y - 2, 256 + half, GFX_MESSAGE_Y + 13);
+							gfx_display_centre_text(GFX_MESSAGE_Y, message_string, 120, GFX_COL_WHITE);
+						}
+					}
+					else if (do_sim && draw_lasers)
+						draw_lasers--;
+
+					if (hyper_ready)
+					{
+						display_hyper_status();
+						if (do_sim && (mcount & 3) == 0)
+							countdown_hyperspace();
 					}
 
-					if ((mcount & 31) == 20)
-						update_cabin_temp();
+					if (do_sim)
+					{
+						mcount--;
+						if (mcount < 0) mcount = 255;
 
-					if ((mcount == 0) && (!witchspace))
-						random_encounter();
+						if ((mcount & 7) == 0) regenerate_shields();
 
-					cool_laser();
-					time_ecm();
+						if ((mcount & 31) == 10)
+						{
+							if (energy < 50)
+							{
+								info_message("ENERGY LOW");
+								snd_play_sample(SND_BEEP);
+							}
+							update_altitude();
+						}
+
+						if ((mcount & 31) == 20)
+							update_cabin_temp();
+
+						if ((mcount == 0) && (!witchspace))
+							random_encounter();
+
+						cool_laser();
+						time_ecm();
+					}
 				}
-
-				update_console();
 			}
 
-			/* Non-flight screens persist in the framebuf - no per-frame redraw.
-			 * They are drawn once by their display_*() function and stay until
-			 * the next screen transition.
-			 * EXCEPTION: chart screens need per-frame redraw so the cursor
-			 * doesn't leave trails as it moves. */
+			/* These flags only mean anything inside this loop. */
+			universe_render_only = 0;
+			star_delta_scale = 1.0;
 
-			if (do_sim && current_screen == SCR_BREAK_PATTERN)
+			if (game_over)
+				break;
+
+			if (current_screen == SCR_BREAK_PATTERN)
 				display_break_pattern();
 
-			if (current_screen == SCR_GALACTIC_CHART ||
-			    current_screen == SCR_SHORT_RANGE)
+			/* Text screens are drawn once by their display_*() function and
+			 * then left alone. The charts are the exception: they are drawn
+			 * again whenever the cursor moves, so it leaves no trail. */
+			if (is_chart())
 			{
-				/* Redraw chart every frame to clear cursor trails.
-				 * Save/restore cross_x/y since display_*_chart() resets
-				 * them to the hyperspace planet position. */
-				int saved_cx = cross_x, saved_cy = cross_y;
-				if (current_screen == SCR_GALACTIC_CHART)
-					display_galactic_chart();
-				else
-					display_short_range_chart();
-				cross_x = saved_cx;
-				cross_y = saved_cy;
-
 				if (cross_timer > 0)
 				{
 					cross_timer--;
-					if (cross_timer == 0)
+					if (cross_timer == 0 && !find_input)
 						show_distance_to_planet();
 				}
 
-				old_cross_x = cross_x;
-				old_cross_y = cross_y;
-				draw_cross(cross_x, cross_y);
+				if (cross_x != old_cross_x || cross_y != old_cross_y)
+				{
+					int cx = cross_x, cy = cross_y;
+					int had_find = find_input;
+
+					if (current_screen == SCR_GALACTIC_CHART)
+						display_galactic_chart();
+					else
+						display_short_range_chart();
+
+					find_input = had_find;
+					cross_x = cx;
+					cross_y = cy;
+
+					if (find_input)
+						show_find_prompt();
+					else if (cross_timer == 0)
+					{
+						show_distance_to_planet();
+					}
+
+					old_cross_x = cross_x;
+					old_cross_y = cross_y;
+					draw_cross(cross_x, cross_y);
+				}
 			}
+
+			/* Dashboard or icon bar, whichever this screen has. */
+			update_icon_bar_type();
+			gfx_set_clip_region(1, 1, 510, GFX_VIEW_BY);
+			update_console();
 		}
 
 		if (game_over < 2)

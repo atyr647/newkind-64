@@ -13,7 +13,15 @@
 #include "sound.h"
 
 #define NUM_SAMPLES 14
-#define NUM_CHANNELS 4
+#define NUM_CHANNELS 4		/* effect channels: 0 .. NUM_CHANNELS-1 */
+
+/* Music gets its own mixer channel, placed after the effect channels.
+ * snd_play_sample() only ever round-robins over 0 .. NUM_CHANNELS-1, so
+ * effects can never steal (or stop) the music channel. */
+#define MUSIC_CHANNEL NUM_CHANNELS
+#define NUM_MIXER_CHANNELS (NUM_CHANNELS + 1)
+#define NUM_TUNES 2
+#define MUSIC_VOLUME 0.6f
 
 static int sound_on;
 
@@ -47,6 +55,18 @@ static int sample_loaded[NUM_SAMPLES];
 /* Track which sample is playing on each channel to avoid conflicts */
 static int ch_playing[NUM_CHANNELS];  /* sample index, or -1 */
 
+/* Music: the original MIDI tunes, pre-rendered to wav64 (see
+ * tools/render_music.sh). Indexed by SND_ELITE_THEME / SND_BLUE_DANUBE. */
+static const char *tune_filenames[NUM_TUNES] = {
+	"rom:/theme.wav64",
+	"rom:/danube.wav64",
+};
+
+/* The music handle is only open while a tune is loaded on MUSIC_CHANNEL.
+ * It is streamed from ROM, so it costs no RAM beyond the mixer buffer. */
+static wav64_t music_wave;
+static int music_open;
+
 void snd_sound_startup(void)
 {
 	int i;
@@ -56,7 +76,8 @@ void snd_sound_startup(void)
 	/* 22050 Hz is the sweet spot: good enough quality, low CPU cost.
 	 * Use more buffers (8) for smoother output. */
 	audio_init(22050, 8);
-	mixer_init(NUM_CHANNELS);
+	mixer_init(NUM_MIXER_CHANNELS);
+	music_open = 0;
 
 	/* Pre-load all samples that exist */
 	for (i = 0; i < NUM_SAMPLES; i++)
@@ -89,6 +110,8 @@ void snd_sound_shutdown(void)
 
 	if (!sound_on)
 		return;
+
+	snd_stop_midi();
 
 	for (i = 0; i < NUM_CHANNELS; i++)
 		mixer_ch_stop(i);
@@ -194,13 +217,49 @@ void snd_update_sound(void)
 }
 
 
+/*
+ * Start a tune on the dedicated music channel. Any tune already playing
+ * (including the same one) is stopped first, so this always restarts
+ * from the beginning.
+ */
 void snd_play_midi(int midi_no, int repeat)
 {
-	(void)midi_no;
-	(void)repeat;
+	FILE *fp;
+
+	if (!sound_on)
+		return;
+
+	if (midi_no < 0 || midi_no >= NUM_TUNES)
+		return;
+
+	snd_stop_midi();
+
+	/* Tolerate a ROM built without the music files. */
+	fp = fopen(tune_filenames[midi_no], "rb");
+	if (!fp)
+		return;
+	fclose(fp);
+
+	/* Always play from a freshly opened handle (same reason as in
+	 * snd_play_sample: replaying a used VADPCM handle is not safe). */
+	wav64_open(&music_wave, tune_filenames[midi_no]);
+	music_open = 1;
+
+	wav64_set_loop(&music_wave, repeat ? true : false);
+	mixer_ch_set_vol(MUSIC_CHANNEL, MUSIC_VOLUME, MUSIC_VOLUME);
+	wav64_play(&music_wave, MUSIC_CHANNEL);
 }
 
 
+/*
+ * Stop the music. Harmless if nothing is playing.
+ */
 void snd_stop_midi(void)
 {
+	if (!sound_on || !music_open)
+		return;
+
+	mixer_ch_stop(MUSIC_CHANNEL);
+	wav64_close(&music_wave);
+	music_open = 0;
 }

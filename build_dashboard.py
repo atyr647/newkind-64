@@ -16,7 +16,12 @@ import struct
 import os
 import shutil
 
-NES_SRC = "/tmp/elite-source-code-nes/1-source-files"
+# Path to a checkout of https://github.com/markmoxon/elite-source-code-nes
+# (override with the NES_SRC environment variable or the first argument).
+import sys
+NES_SRC = os.environ.get("NES_SRC", "/tmp/elite-source-code-nes/1-source-files")
+if len(sys.argv) > 1:
+    NES_SRC = sys.argv[1]
 
 # ---------- NES NTSC color palette (CRT-accurate values) ----------
 # Using CRT-desaturated values for more authentic TV appearance.
@@ -46,15 +51,23 @@ NES_PALETTE = [
 # ---------- NES color code to BMP palette index mapping ----------
 # Maps each NES color code used in the space view to a GFX_COL_xxx
 # palette index, so tile colors match the C code's expectations.
+# The NES colours get their own palette slots (224-231), which nothing else
+# in the game uses, so the dashboard art can never disturb the colours of
+# ships, planets, text or sprites. gfx.h names them GFX_COL_NES_xxx.
 NES_TO_BMP = {
-    0x0F: 0,    # black          → GFX_COL_BLACK
-    0x1A: 2,    # dark green     → GFX_COL_GREEN_1 (gauge fill!)
-    0x16: 28,   # dark red       → GFX_COL_DARK_RED
-    0x10: 235,  # grey           → GFX_COL_GREY_2
-    0x00: 234,  # dark grey      → GFX_COL_GREY_3
-    0x2C: 11,   # light blue     → GFX_COL_CYAN
-    0x28: 37,   # yellow-green   → GFX_COL_YELLOW_1
-    0x1C: 17,   # dark cyan      → GFX_COL_GREEN_2
+    0x0F: 0,    # black
+    0x1A: 224,  # green       -> GFX_COL_NES_GREEN  (gauge fill)
+    0x16: 225,  # dark red    -> GFX_COL_NES_RED    (scanner grid)
+    0x10: 226,  # grey        -> GFX_COL_NES_GREY
+    0x00: 227,  # dark grey   -> GFX_COL_NES_DGREY
+    0x2C: 228,  # light blue  -> GFX_COL_NES_BLUE
+    0x28: 229,  # label tint  -> GFX_COL_NES_LABEL
+    0x1C: 230,  # dark cyan   -> GFX_COL_NES_CYAN   (fuel / altitude fill)
+}
+# Extra slots used only by code-drawn dashboard elements.
+EXTRA_NES = {
+    231: (228, 196, 144),  # $37 pale yellow -> GFX_COL_NES_POINTER
+    232: (212, 136, 32),   # $27 amber       -> GFX_COL_NES_AMBER (danger flash)
 }
 
 # ---------- viewPalettes set 0 (space view) ----------
@@ -159,7 +172,7 @@ def build_full_palette():
 
     The original Elite palette is needed because sprite data (Elite logo,
     compass dots, missiles, etc.) was created using it. We override only
-    the 8 indices used by NES dashboard tile rendering.
+    palette slots 224-232, which the game itself never uses.
     """
     # Start with the full original Elite palette (from git initial commit)
     pal = [
@@ -229,10 +242,11 @@ def build_full_palette():
         (  0,  0,255),(255,  0,255),(  0,255,255),(255,255,255),  # 252-255
     ]
 
-    # Override the 8 indices used by NES dashboard tile colors.
-    # These must match NES_TO_BMP mapping for tiles to render correctly.
+    # Put the NES colours in their private slots.
     for nes_code, bmp_idx in NES_TO_BMP.items():
         pal[bmp_idx] = NES_PALETTE[nes_code]
+    for bmp_idx, rgb in EXTRA_NES.items():
+        pal[bmp_idx] = rgb
 
     return pal
 
@@ -268,91 +282,80 @@ def write_bmp(pixels, width, height, palette, filename):
             f.write(row)
 
 
-def main():
-    dash_bin = os.path.join(NES_SRC, "images/other-images/binaries/dashImage_pattern0.bin")
-    icon_bin = os.path.join(NES_SRC, "images/other-images/binaries/iconBarImage1_pattern0.bin")
+def read_bar_names(n):
+    """Read the barNames<n> nametable (2 rows x 32 tiles) from the NES source."""
+    asm = os.path.join(NES_SRC, "main-sources/elite-source-bank-3.asm")
+    vals = []
+    grab = False
+    with open(asm) as f:
+        for line in f:
+            if line.strip() == ".barNames%d" % n:
+                grab = True
+                continue
+            if grab:
+                t = line.strip()
+                if t.startswith("EQUB"):
+                    vals += [int(x.strip().lstrip("$"), 16) for x in t[4:].split(";")[0].split(",")]
+                elif t.startswith(";") and vals:
+                    break
+    assert len(vals) == 64, "barNames%d: got %d tiles" % (n, len(vals))
+    return vals
 
-    with open(dash_bin, "rb") as f:
-        dash_data = f.read()
-    with open(icon_bin, "rb") as f:
+
+def load_patterns(icon_file, dash_data):
+    with open(os.path.join(NES_SRC, "images/other-images/binaries", icon_file), "rb") as f:
         icon_data = f.read()
-
-    print(f"Dashboard tiles: {len(dash_data)//16} ({len(dash_data)} bytes)")
-    print(f"Icon bar tiles: {len(icon_data)//16} ({len(icon_data)} bytes)")
-
-    # Build pattern table (256 entries, each 8x8 of 2-bit color indices)
     patterns = [[[0]*8 for _ in range(8)] for _ in range(256)]
+    for i in range(len(icon_data) // 16):       # icon bar tiles: patterns 5-68
+        if 5 + i < 256:
+            patterns[5 + i] = decode_nes_tile(icon_data[i*16:(i+1)*16])
+    for i in range(len(dash_data) // 16):       # dashboard tiles: patterns 69+
+        if 69 + i < 256:
+            patterns[69 + i] = decode_nes_tile(dash_data[i*16:(i+1)*16])
+    return patterns
 
-    # Icon bar tiles at pattern indices 5-68
-    for i in range(len(icon_data) // 16):
-        idx = 5 + i
-        if idx < 256:
-            patterns[idx] = decode_nes_tile(icon_data[i*16:(i+1)*16])
 
-    # Dashboard tiles at pattern indices 69-255
-    for i in range(len(dash_data) // 16):
-        idx = 69 + i
-        if idx < 256:
-            patterns[idx] = decode_nes_tile(dash_data[i*16:(i+1)*16])
-
-    # Build screen nametable (10 rows x 32 cols)
-    nametable = [[0]*32 for _ in range(10)]
-    for col in range(32):
-        nametable[0][col] = BAR_NAMES_1[col]
-        nametable[1][col] = BAR_NAMES_1[32 + col]
-    for row in range(7):
-        for col in range(32):
-            nametable[2 + row][col] = DASH_NAMES[row * 32 + col]
-
-    # Render NES pixels (256 x 80) using GFX_COL-compatible palette indices
-    nes_w, nes_h = 256, 80
-    nes_pixels = [[0]*nes_w for _ in range(nes_h)]
-
-    for tile_row_local in range(10):
-        tile_row_global = 20 + tile_row_local
-        for tile_col in range(32):
-            tile_idx = nametable[tile_row_local][tile_col]
-            tile_pixels = patterns[tile_idx]
-            palette_num = get_palette_for_tile(tile_row_global, tile_col)
-
+def render(nametable, patterns, first_row=20):
+    """Render tile rows to palette-indexed pixels at 2x scale."""
+    rows = len(nametable)
+    out = [[0]*512 for _ in range(rows * 16)]
+    for r in range(rows):
+        for c in range(32):
+            tile = patterns[nametable[r][c]]
+            pal = get_palette_for_tile(first_row + r, c)
             for py in range(8):
                 for px in range(8):
-                    color_idx = tile_pixels[py][px]
-                    bmp_idx = PAL_TO_BMP[(palette_num, color_idx)]
-                    sx = tile_col * 8 + px
-                    sy = tile_row_local * 8 + py
-                    if sx < nes_w and sy < nes_h:
-                        nes_pixels[sy][sx] = bmp_idx
+                    v = PAL_TO_BMP[(pal, tile[py][px])]
+                    x, y = (c*8 + px) * 2, (r*8 + py) * 2
+                    out[y][x] = out[y][x+1] = out[y+1][x] = out[y+1][x+1] = v
+    return out
 
-    # Scale 2x → 512 x 160
-    out_w, out_h = 512, 160
-    out_pixels = [[0]*out_w for _ in range(out_h)]
-    for y in range(nes_h):
-        for x in range(nes_w):
-            val = nes_pixels[y][x]
-            out_pixels[y*2][x*2] = val
-            out_pixels[y*2][x*2+1] = val
-            out_pixels[y*2+1][x*2] = val
-            out_pixels[y*2+1][x*2+1] = val
 
+def main():
+    with open(os.path.join(NES_SRC, "images/other-images/binaries/dashImage_pattern0.bin"), "rb") as f:
+        dash_data = f.read()
     palette = build_full_palette()
-    write_bmp(out_pixels, out_w, out_h, palette, "scanner.bmp")
-    print(f"Wrote scanner.bmp ({out_w}x{out_h})")
 
-    shutil.copy("scanner.bmp", "filesystem/scanner.bmp")
-    print("Copied to filesystem/scanner.bmp")
+    # scanner.bmp: flight icon bar (2 rows) + dashboard (7 rows) + 1 blank row
+    bar1 = read_bar_names(1)
+    assert bar1 == BAR_NAMES_1
+    nametable = [bar1[0:32], bar1[32:64]]
+    for row in range(7):
+        nametable.append(DASH_NAMES[row*32:(row+1)*32])
+    nametable.append([0]*32)
+    pixels = render(nametable, load_patterns("iconBarImage1_pattern0.bin", dash_data))
+    write_bmp(pixels, 512, 160, palette, "scanner.bmp")
+    print("Wrote scanner.bmp (512x160)")
 
-    # Print color mapping for verification
-    print("\nNES color → BMP palette index mapping:")
-    for nes_code, bmp_idx in sorted(NES_TO_BMP.items()):
-        r, g, b = NES_PALETTE[nes_code]
-        print(f"  NES ${nes_code:02X} ({r:3d},{g:3d},{b:3d}) → BMP index {bmp_idx:3d}")
-
-    print("\nPalette→BMP tile color mapping:")
-    for pal in range(4):
-        codes = VIEW_PALETTES_0[pal]
-        indices = [PAL_TO_BMP[(pal, c)] for c in range(4)]
-        print(f"  BG{pal}: NES ${codes[0]:02X},${codes[1]:02X},${codes[2]:02X},${codes[3]:02X} → BMP {indices}")
+    # iconbar.bmp: the three icon bars stacked: docked, flight, charts.
+    # They are drawn with the same tile colours the bar has in the space view.
+    strips = []
+    for n in (0, 1, 2):
+        names = read_bar_names(n)
+        strips += render([names[0:32], names[32:64]],
+                         load_patterns("iconBarImage%d_pattern0.bin" % n, dash_data))
+    write_bmp(strips, 512, 96, palette, "iconbar.bmp")
+    print("Wrote iconbar.bmp (512x96)")
 
 
 if __name__ == "__main__":

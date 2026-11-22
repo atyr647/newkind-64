@@ -3,48 +3,49 @@
  *
  * Nintendo 64 controller input routines using libdragon.
  *
- * N64 Controller Layout (NES-style icon bar navigation):
+ * The game logic still thinks in terms of the original keyboard flags
+ * (kbd_F1_pressed and friends); this file turns the controller into those.
  *
- *   FLIGHT MODE:
- *     Analog Stick:  Pitch (Y) / Roll (X) - analog flight control
- *     C-Up/C-Down:   Climb / Dive (digital pitch)
- *     C-Left/C-Right: Roll left / Roll right (digital roll)
- *     D-Pad Left/Right: Navigate icon bar
- *     D-Pad Up/Down: Speed up / Speed down
- *     A (held):      Fire laser
- *     B (press):     Activate selected icon
- *     Z (held):      Decrease speed (alternative)
- *     R:             Cycle space views (front/right/rear/left)
- *     L:             Launch (docked) / Front view (flight)
- *     Start:         Pause
+ *   SPACE VIEWS (front / rear / left / right):
+ *     Analog Stick     Pitch and roll
+ *     C-Buttons        Pitch and roll (digital)
+ *     D-Pad Up/Down    Speed up / slow down
+ *     Z (held)         Slow down
+ *     A (held)         Fire laser
+ *     D-Pad Left/Right Move the icon bar pointer
+ *     B                Use the selected icon
+ *     R                Next view (front -> rear -> left -> right)
+ *     L                Front view
+ *     Start            Pause menu
  *
- *   MENU/CHART MODE:
- *     D-Pad:         Navigate menus / Move chart cursor
- *     Analog Stick:  Navigate menus / Move chart cursor
- *     A:             Confirm / Select / Buy
- *     B:             Cancel / Back / Sell
- *     Start:         Pause
+ *   EVERY OTHER SCREEN (status, market, charts, equip, ...):
+ *     D-Pad / Stick    Move through lists, buy/sell, move the chart cursor
+ *     A                Confirm / buy / select
+ *     B                Cancel; in flight, back to the front view
+ *     C-Left/C-Right   Move the icon bar pointer
+ *     C-Down           Use the selected icon
+ *     L                In flight: back to the front view
+ *     Start            Pause menu
  *
- *   MODIFIER COMBOS (all modes):
- *     L+R+A:         Hyperspace
- *     L+R+B:         Galactic hyperspace
- *     L+R+C-Up:      Docking computer
- *     L+R+C-Down:    Jump drive
- *     L+R+C-Left:    Energy bomb
- *     L+R+C-Right:   Escape pod
- *     L+R+Start:     Find planet
- *     L+R+D-Up:      Distance
- *     L+R+D-Down:    Zoom
- *     L+R+D-Left:    Origin
+ *   SHORTCUTS (hold the shoulder button, then press):
+ *     R + D-Up         Galactic chart        L + D-Up     Commander status
+ *     R + D-Down       Short range chart     L + D-Down   Inventory
+ *     R + D-Left       Data on system        L + D-Left   Equip ship (docked)
+ *     R + D-Right      Market prices         L + D-Right  Options
  *
- *     R+D-Up:        Galactic chart
- *     R+D-Down:      Short range chart
- *     R+D-Left:      Planet data
- *     R+D-Right:     Market prices
- *     L+D-Up:        Commander status
- *     L+D-Down:      Inventory
- *     L+D-Left:      Equip ship
- *     L+D-Right:     Options
+ *     L+R + A          Hyperspace            L+R + B        Galactic hyperspace
+ *     L+R + C-Up       Docking computer      L+R + C-Down   In-system jump
+ *     L+R + C-Left     Energy bomb           L+R + C-Right  Escape pod
+ *     L+R + D-Up       Chart distance / docking computer off
+ *     L+R + D-Down     Scanner zoom          L+R + D-Left   Chart cursor home
+ *     L+R + Z          Find planet (on a chart)
+ *
+ * (L+R+Start is not used: the controller itself treats that as "reset the
+ * analog stick" and never reports it.)
+ *
+ * L and R on their own act when the button is RELEASED, and only if it was
+ * not used for a shortcut, so reaching for a shortcut never changes the view.
+ * Neither does anything while docked, so they can never launch the ship.
  */
 
 #include <stdlib.h>
@@ -52,14 +53,19 @@
 
 #include <libdragon.h>
 
+#include "config.h"
+#include "gfx.h"
 #include "keyboard.h"
 #include "elite.h"
+
+extern int find_input;	/* n64_main.c: entering a planet name */
 
 /* Analog stick deadzone */
 #define STICK_DEADZONE  20
 
-/* Virtual keyboard text input state for planet finder */
-static int text_input_cursor;
+/* Auto-repeat for list navigation, in milliseconds. */
+#define REPEAT_DELAY_MS  320
+#define REPEAT_RATE_MS   90
 
 int kbd_F1_pressed;
 int kbd_F2_pressed;
@@ -104,8 +110,8 @@ int kbd_space_pressed;
 int kbd_i_pressed;
 
 /* Analog flight control (joystick mapped to roll/pitch) */
-int joy_roll;       /* -127..+127, positive = roll right */
-int joy_pitch;      /* -127..+127, positive = pitch down (dive) */
+int joy_roll;       /* -127..+127, positive = stick right */
+int joy_pitch;      /* -127..+127, positive = stick down (pull back) */
 
 /* Icon bar navigation */
 int kbd_icon_left_pressed;
@@ -120,14 +126,26 @@ int kbd_roll_right_pressed;
 
 char old_key[128];
 
-/* Track previous L/R state for edge detection */
-static int prev_l = 0, prev_r = 0;
+/* Shoulder buttons: was the current hold used for a shortcut? */
+static int prev_l, prev_r;
+static int l_used, r_used;
+
+/* After a shortcut the D-pad is ignored until it has been let go, so the
+ * direction that opened a screen is not also acted on by that screen. */
+static int dpad_locked;
+
+/* Auto-repeat state for the four navigation directions. */
+static int nav_held[4];
+static long long nav_next[4];
+
 
 int kbd_keyboard_startup(void)
 {
 	joypad_init();
 	memset(old_key, 0, sizeof(old_key));
-	text_input_cursor = 0;
+	prev_l = prev_r = l_used = r_used = 0;
+	dpad_locked = 0;
+	memset(nav_held, 0, sizeof(nav_held));
 	return 0;
 }
 
@@ -136,8 +154,7 @@ int kbd_keyboard_shutdown(void)
 	return 0;
 }
 
-/* Check if current screen is a flight/space view */
-static int is_flight_screen(void)
+static int is_space_view(void)
 {
 	return (current_screen == SCR_FRONT_VIEW ||
 		current_screen == SCR_REAR_VIEW ||
@@ -145,36 +162,47 @@ static int is_flight_screen(void)
 		current_screen == SCR_RIGHT_VIEW);
 }
 
-
-void kbd_poll_keyboard(void)
+static int is_chart(void)
 {
-	int stick_x, stick_y;
-	int l_held, r_held, lr_held;
-	int l_just, r_just;
-	int in_flight;
+	return (current_screen == SCR_GALACTIC_CHART ||
+		current_screen == SCR_SHORT_RANGE);
+}
 
-	/* Read controller */
-	joypad_poll();
-	joypad_buttons_t btns = joypad_get_buttons(JOYPAD_PORT_1);
-	joypad_buttons_t pressed = joypad_get_buttons_pressed(JOYPAD_PORT_1);
-	joypad_inputs_t inputs = joypad_get_inputs(JOYPAD_PORT_1);
+/*
+ * Turn a held direction into "act now" pulses: once when first pressed,
+ * then repeating after a short delay. The timing is in real time, so list
+ * navigation feels the same whatever the frame rate.
+ */
+static int nav_repeat(int dir, int held)
+{
+	long long now;
 
-	/* Read analog stick */
-	stick_x = inputs.stick_x;
-	stick_y = inputs.stick_y;
+	if (!held)
+	{
+		nav_held[dir] = 0;
+		return 0;
+	}
 
-	/* Shoulder button state */
-	l_held = btns.l;
-	r_held = btns.r;
-	lr_held = l_held && r_held;
-	l_just = l_held && !prev_l;
-	r_just = r_held && !prev_r;
-	prev_l = l_held;
-	prev_r = r_held;
+	now = timer_ticks();
 
-	in_flight = is_flight_screen();
+	if (!nav_held[dir])
+	{
+		nav_held[dir] = 1;
+		nav_next[dir] = now + TIMER_TICKS(REPEAT_DELAY_MS * 1000LL);
+		return 1;
+	}
 
-	/* Clear all key states */
+	if (now >= nav_next[dir])
+	{
+		nav_next[dir] = now + TIMER_TICKS(REPEAT_RATE_MS * 1000LL);
+		return 1;
+	}
+
+	return 0;
+}
+
+static void clear_flags(void)
+{
 	kbd_F1_pressed = 0;
 	kbd_F2_pressed = 0;
 	kbd_F3_pressed = 0;
@@ -226,85 +254,124 @@ void kbd_poll_keyboard(void)
 	kbd_dive_pressed = 0;
 	kbd_roll_left_pressed = 0;
 	kbd_roll_right_pressed = 0;
+}
+
+
+void kbd_poll_keyboard(void)
+{
+	joypad_buttons_t btns, pressed;
+	joypad_inputs_t inputs;
+	int stick_x, stick_y;
+	int l_held, r_held;
+	int l_released, r_released;
+	int dpad_any, dpad_hit;
+	int space_view;
+
+	joypad_poll();
+	btns = joypad_get_buttons(JOYPAD_PORT_1);
+	pressed = joypad_get_buttons_pressed(JOYPAD_PORT_1);
+	inputs = joypad_get_inputs(JOYPAD_PORT_1);
+
+	stick_x = inputs.stick_x;
+	stick_y = inputs.stick_y;
+
+	clear_flags();
+
+	space_view = is_space_view();
+
+	/* Shoulder button bookkeeping. */
+	l_held = btns.l;
+	r_held = btns.r;
+	l_released = prev_l && !l_held;
+	r_released = prev_r && !r_held;
+	if (l_held && !prev_l) l_used = 0;
+	if (r_held && !prev_r) r_used = 0;
+	prev_l = l_held;
+	prev_r = r_held;
+
+	/* D-pad lock after a shortcut. */
+	dpad_any = btns.d_up || btns.d_down || btns.d_left || btns.d_right;
+	if (dpad_locked)
+	{
+		if (!dpad_any)
+			dpad_locked = 0;
+		btns.d_up = btns.d_down = btns.d_left = btns.d_right = 0;
+		pressed.d_up = pressed.d_down = pressed.d_left = pressed.d_right = 0;
+	}
+	dpad_hit = pressed.d_up || pressed.d_down || pressed.d_left || pressed.d_right;
 
 	/*
-	 * ==========================================
-	 * L+R combos (highest priority)
-	 * ==========================================
+	 * L + R held together: the action shortcuts.
 	 */
-	if (lr_held)
+	if (l_held && r_held)
 	{
-		kbd_ctrl_pressed = 1;
+		l_used = r_used = 1;
+
 		if (pressed.a)       kbd_hyperspace_pressed = 1;
-		if (pressed.b)       { kbd_hyperspace_pressed = 1; kbd_ctrl_pressed = 1; } /* galactic */
+		if (pressed.b)       { kbd_hyperspace_pressed = 1; kbd_ctrl_pressed = 1; }
 		if (pressed.c_up)    kbd_dock_pressed = 1;
 		if (pressed.c_down)  kbd_jump_pressed = 1;
-		if (pressed.c_left)  kbd_energy_bomb_pressed = 1;
-		if (pressed.c_right) kbd_escape_pressed = 1;
-		if (pressed.start)   kbd_find_pressed = 1;
+		if (pressed.c_left)  { kbd_energy_bomb_pressed = 1; kbd_ctrl_pressed = 1; }
+		if (pressed.c_right) { kbd_escape_pressed = 1; kbd_ctrl_pressed = 1; }
+		if (pressed.z)       kbd_find_pressed = 1;
 		if (pressed.d_up)    kbd_d_pressed = 1;
 		if (pressed.d_down)  kbd_zoom_pressed = 1;
 		if (pressed.d_left)  kbd_origin_pressed = 1;
-		return; /* Don't process anything else */
-	}
 
-	/*
-	 * ==========================================
-	 * R + D-Pad = Screen selection group 1
-	 * ==========================================
-	 */
-	if (r_held && (pressed.d_up || pressed.d_down || pressed.d_left || pressed.d_right))
-	{
-		if (pressed.d_up)    kbd_F5_pressed = 1;    /* Galactic chart */
-		if (pressed.d_down)  kbd_F6_pressed = 1;    /* Short range chart */
-		if (pressed.d_left)  kbd_F7_pressed = 1;    /* Planet data */
-		if (pressed.d_right) kbd_F8_pressed = 1;    /* Market prices */
+		if (dpad_hit)
+			dpad_locked = 1;
 		return;
 	}
 
 	/*
-	 * ==========================================
-	 * L + D-Pad = Screen selection group 2
-	 * ==========================================
+	 * R + D-pad and L + D-pad: jump straight to a screen.
 	 */
-	if (l_held && (pressed.d_up || pressed.d_down || pressed.d_left || pressed.d_right))
+	if (r_held && dpad_hit)
 	{
-		if (pressed.d_up)    kbd_F9_pressed = 1;    /* Commander status */
-		if (pressed.d_down)  kbd_F10_pressed = 1;   /* Inventory */
-		if (pressed.d_left)  kbd_F4_pressed = 1;    /* Equip ship */
-		if (pressed.d_right) kbd_F11_pressed = 1;   /* Options */
+		if (pressed.d_up)         kbd_F5_pressed = 1;   /* Galactic chart */
+		else if (pressed.d_down)  kbd_F6_pressed = 1;   /* Short range chart */
+		else if (pressed.d_left)  kbd_F7_pressed = 1;   /* Data on system */
+		else                      kbd_F8_pressed = 1;   /* Market prices */
+		r_used = 1;
+		dpad_locked = 1;
+		return;
+	}
+
+	if (l_held && dpad_hit)
+	{
+		if (pressed.d_up)         kbd_F9_pressed = 1;   /* Commander status */
+		else if (pressed.d_down)  kbd_F10_pressed = 1;  /* Inventory */
+		else if (pressed.d_left)  { if (docked) kbd_F4_pressed = 1; } /* Equip ship */
+		else                      kbd_F11_pressed = 1;  /* Options */
+		l_used = 1;
+		dpad_locked = 1;
 		return;
 	}
 
 	/*
-	 * ==========================================
-	 * L alone = Launch (docked) / Front view
-	 * R alone = Cycle space views
-	 * ==========================================
+	 * L or R tapped on their own (in flight only).
 	 */
-	if (l_just && !r_held)
-		kbd_F1_pressed = 1;
-
-	if (r_just && !l_held)
+	if (!docked)
 	{
-		/* Cycle: front -> right -> rear -> left */
-		static int view_idx = 0;
-		view_idx = (view_idx + 1) & 3;
-		switch (view_idx)
+		if (l_released && !l_used)
+			kbd_F1_pressed = 1;                         /* Front view */
+
+		if (r_released && !r_used)
 		{
-			case 0: kbd_F1_pressed = 1; break;
-			case 1: kbd_F4_pressed = 1; break;
-			case 2: kbd_F2_pressed = 1; break;
-			case 3: kbd_F3_pressed = 1; break;
+			switch (current_screen)
+			{
+				case SCR_FRONT_VIEW: kbd_F2_pressed = 1; break;  /* -> rear */
+				case SCR_REAR_VIEW:  kbd_F3_pressed = 1; break;  /* -> left */
+				case SCR_LEFT_VIEW:  kbd_F4_pressed = 1; break;  /* -> right */
+				default:             kbd_F1_pressed = 1; break;  /* -> front */
+			}
 		}
 	}
 
 	/*
-	 * ==========================================
-	 * A = Fire laser (held) / Confirm (pressed)
-	 * ==========================================
+	 * A: fire laser (held) / confirm (pressed).
 	 */
-	if (btns.a)
+	if (btns.a && space_view)
 		kbd_fire_pressed = 1;
 	if (pressed.a)
 	{
@@ -313,61 +380,7 @@ void kbd_poll_keyboard(void)
 	}
 
 	/*
-	 * ==========================================
-	 * B = Activate icon bar (flight) / Cancel (menus)
-	 * ==========================================
-	 */
-	if (in_flight)
-	{
-		/* In flight: B press activates selected icon bar item */
-		if (pressed.b)
-			kbd_icon_activate_pressed = 1;
-	}
-	else
-	{
-		/* In menus: B = cancel/no/back */
-		if (pressed.b)
-		{
-			kbd_n_pressed = 1;
-			kbd_backspace_pressed = 1;
-		}
-	}
-
-	/*
-	 * ==========================================
-	 * Z = Speed down (held)
-	 * ==========================================
-	 */
-	if (btns.z)
-		kbd_dec_speed_pressed = 1;
-
-	/*
-	 * ==========================================
-	 * C-buttons: Flight = digital pitch/roll (strafe)
-	 *            Non-flight = missile/ECM management
-	 * ==========================================
-	 */
-	if (in_flight && !docked)
-	{
-		/* C-buttons for digital strafing (pitch/roll) in flight */
-		if (btns.c_up)    kbd_climb_pressed = 1;   /* Pitch up = dive (nose down) */
-		if (btns.c_down)  kbd_dive_pressed = 1;    /* Pitch down = climb (nose up) */
-		if (btns.c_left)  kbd_roll_left_pressed = 1;
-		if (btns.c_right) kbd_roll_right_pressed = 1;
-	}
-	else
-	{
-		/* Outside flight: C-buttons for weapon management */
-		if (pressed.c_right)  kbd_fire_missile_pressed = 1;
-		if (pressed.c_up)     kbd_target_missile_pressed = 1;
-		if (pressed.c_down)   kbd_unarm_missile_pressed = 1;
-		if (pressed.c_left)   kbd_ecm_pressed = 1;
-	}
-
-	/*
-	 * ==========================================
-	 * Start = Pause/Resume/Skip
-	 * ==========================================
+	 * Start: pause menu in the game; "continue" on title and briefings.
 	 */
 	if (pressed.start)
 	{
@@ -376,52 +389,67 @@ void kbd_poll_keyboard(void)
 		kbd_space_pressed = 1;
 	}
 
-	/*
-	 * ==========================================
-	 * D-Pad: context-dependent
-	 *   Flight: L/R = icon bar, U/D = speed
-	 *   Menus:  Navigation
-	 * ==========================================
-	 */
-	if (in_flight)
+	if (space_view)
 	{
-		/* Flight mode: D-pad L/R = icon bar, U/D = speed */
+		/* B uses the selected icon; D-pad left/right moves the pointer. */
+		if (pressed.b)        kbd_icon_activate_pressed = 1;
 		if (pressed.d_left)   kbd_icon_left_pressed = 1;
 		if (pressed.d_right)  kbd_icon_right_pressed = 1;
+
+		/* Throttle. */
 		if (btns.d_up)        kbd_inc_speed_pressed = 1;
 		if (btns.d_down)      kbd_dec_speed_pressed = 1;
-	}
-	else
-	{
-		/* Menu/chart mode: D-pad = navigation */
-		if (btns.d_up)    kbd_up_pressed = 1;
-		if (btns.d_down)  kbd_down_pressed = 1;
-		if (btns.d_left)  kbd_left_pressed = 1;
-		if (btns.d_right) kbd_right_pressed = 1;
-	}
+		if (btns.z)           kbd_dec_speed_pressed = 1;
 
-	/*
-	 * ==========================================
-	 * Analog stick: context-dependent
-	 *   Flight: analog pitch/roll control
-	 *   Menus:  navigation (digital threshold)
-	 * ==========================================
-	 */
-	if (in_flight)
-	{
-		/* Flight: analog stick → roll/pitch */
+		/* C-buttons: digital pitch and roll. */
+		if (btns.c_up)    kbd_climb_pressed = 1;
+		if (btns.c_down)  kbd_dive_pressed = 1;
+		if (btns.c_left)  kbd_roll_left_pressed = 1;
+		if (btns.c_right) kbd_roll_right_pressed = 1;
+
+		/* Analog stick: pitch and roll. */
 		if (abs(stick_x) > STICK_DEADZONE)
-			joy_roll = stick_x;   /* positive = right */
+			joy_roll = stick_x;
 		if (abs(stick_y) > STICK_DEADZONE)
-			joy_pitch = -stick_y; /* invert: stick up = pitch down (dive), matching NES */
+			joy_pitch = -stick_y;
+
+		memset(nav_held, 0, sizeof(nav_held));
 	}
 	else
 	{
-		/* Menus: stick = digital navigation */
-		if (stick_x > STICK_DEADZONE)   kbd_right_pressed = 1;
-		if (stick_x < -STICK_DEADZONE)  kbd_left_pressed = 1;
-		if (stick_y > STICK_DEADZONE)   kbd_up_pressed = 1;
-		if (stick_y < -STICK_DEADZONE)  kbd_down_pressed = 1;
+		int up    = btns.d_up    || (stick_y >  STICK_DEADZONE * 2);
+		int down  = btns.d_down  || (stick_y < -STICK_DEADZONE * 2);
+		int left  = btns.d_left  || (stick_x < -STICK_DEADZONE * 2);
+		int right = btns.d_right || (stick_x >  STICK_DEADZONE * 2);
+
+		/* B cancels / answers "no" / deletes a letter. */
+		if (pressed.b)
+		{
+			kbd_n_pressed = 1;
+			kbd_backspace_pressed = 1;
+		}
+
+		/* The icon bar is on the C-buttons here, as the D-pad is busy. */
+		if (pressed.c_left)   kbd_icon_left_pressed = 1;
+		if (pressed.c_right)  kbd_icon_right_pressed = 1;
+		if (pressed.c_down)   kbd_icon_activate_pressed = 1;
+
+		if (is_chart() && !find_input)
+		{
+			/* The chart cursor glides for as long as the direction is held. */
+			kbd_up_pressed = up;
+			kbd_down_pressed = down;
+			kbd_left_pressed = left;
+			kbd_right_pressed = right;
+			memset(nav_held, 0, sizeof(nav_held));
+		}
+		else
+		{
+			kbd_up_pressed    = nav_repeat(0, up);
+			kbd_down_pressed  = nav_repeat(1, down);
+			kbd_left_pressed  = nav_repeat(2, left);
+			kbd_right_pressed = nav_repeat(3, right);
+		}
 	}
 }
 

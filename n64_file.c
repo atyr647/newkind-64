@@ -54,12 +54,50 @@ int n64_save_exists(void)
 
 
 /*
- * Config file is read-only on N64 (baked into ROM).
- * Write is a no-op.
+ * Game settings.
+ *
+ * The defaults come from newkind.cfg in the ROM. Changes made on the Game
+ * Settings screen are kept in one EEPROM block, well clear of the commander
+ * save (which uses blocks 0-32), and applied over the defaults at start-up.
  */
+#define SETTINGS_BLOCK	48
+
 void write_config_file(void)
 {
-	/* No-op on N64: config is in ROM, can't write back */
+	uint8_t buf[8];
+
+	if (!eeprom_available)
+		return;
+
+	buf[0] = 'N';
+	buf[1] = 'K';
+	buf[2] = 'S';
+	buf[3] = 1;		/* layout version */
+	buf[4] = wireframe ? 1 : 0;
+	buf[5] = anti_alias_gfx ? 1 : 0;
+	buf[6] = planet_render_style & 3;
+	buf[7] = (hoopy_casinos ? 1 : 0) | (instant_dock ? 2 : 0) | (remap_keys ? 4 : 0);
+
+	eeprom_write(SETTINGS_BLOCK, buf);
+}
+
+static void read_saved_settings(void)
+{
+	uint8_t buf[8];
+
+	if (!eeprom_available)
+		return;
+
+	eeprom_read(SETTINGS_BLOCK, buf);
+	if (buf[0] != 'N' || buf[1] != 'K' || buf[2] != 'S' || buf[3] != 1)
+		return;
+
+	wireframe = buf[4] & 1;
+	anti_alias_gfx = buf[5] & 1;
+	planet_render_style = buf[6] & 3;
+	hoopy_casinos = buf[7] & 1;
+	instant_dock = (buf[7] >> 1) & 1;
+	remap_keys = (buf[7] >> 2) & 1;
 }
 
 
@@ -70,14 +108,12 @@ void write_config_file(void)
 static int read_cfg_line_from_buf(const char *buf, int buflen, int *pos, char *str, int max_size)
 {
 	char *s;
-	int start;
 
 	do
 	{
 		if (*pos >= buflen)
 			return -1;
 
-		start = *pos;
 		/* Copy until newline or end */
 		int i = 0;
 		while (*pos < buflen && buf[*pos] != '\n' && i < max_size - 1)
@@ -209,7 +245,10 @@ void read_config_file(void)
 
 	buf = load_rom_file("newkind.cfg", &buflen);
 	if (!buf)
+	{
+		read_saved_settings();
 		return;
+	}
 
 	if (read_cfg_line_from_buf(buf, buflen, &pos, str, sizeof(str)) == 0)
 		sscanf(str, "%d", &speed_cap);
@@ -240,6 +279,8 @@ void read_config_file(void)
 		sscanf(str, "%d", &remap_keys);
 
 	free(buf);
+
+	read_saved_settings();
 }
 
 
@@ -266,7 +307,7 @@ static int checksum(unsigned char *block)
 
 
 /*
- * Save commander to SRAM.
+ * Save commander to the cartridge EEPROM.
  * Uses the same 256-byte binary format as the original .nkc files.
  * The path parameter is ignored on N64 (single save slot).
  */
@@ -361,7 +402,7 @@ int save_commander_file(char *path)
 
 
 /*
- * Load commander from SRAM.
+ * Load commander from the cartridge EEPROM.
  * The path parameter is ignored on N64 (single save slot).
  */
 int load_commander_file(char *path)

@@ -727,6 +727,22 @@ void update_scanner (void)
 		y = universe[i].location.y * scanner_zoom / 256;
 		z = universe[i].location.z * scanner_zoom / 256;
 
+#ifdef PLATFORM_N64
+		/* NES scanner geometry at 2x: the disc is +/-63 units wide and
+		 * +/-16 deep (x = 124 + x_hi, y = 199 - z_hi / 4 in NES pixels),
+		 * with the stick height showing how far above or below us it is. */
+		if ((x <= -64) || (x >= 64) || (y <= -64) || (y >= 64) ||
+			(z <= -64) || (z >= 64))
+			continue;
+
+		x1 = x * 2;
+		y1 = -z / 2;
+		y2 = y1 - y;
+
+		/* Keep the stick inside the dashboard, clear of the icon bar. */
+		if (y2 < -40) y2 = -40;
+		if (y2 > 58) y2 = 58;
+#else
 		x1 = x;
 		y1 = -z / 4;
 		y2 = y1 - y / 2;
@@ -734,6 +750,7 @@ void update_scanner (void)
 		if ((y2 < -28) || (y2 > 28) ||
 			(x1 < -50) || (x1 > 50))
 			continue;
+#endif
 
 		x1 += scanner_cx;
 		y1 += scanner_cy;
@@ -808,97 +825,82 @@ void update_compass (void)
  * Display the speed bar.
  */
 
-void display_speed (void)
-{
-	int i, len, colour;
-	/* NES row 27, col 28: screen X = (28-1)*8*2 = 432, Y = (27-20)*16 = 112 */
-	int sx = 432;
-	int sy = SCANNER_Y + 112;
-
-	len = ((flight_speed * 64) / myship.max_speed) - 1;
-	/* NES palette 1: normal = color 3 ($1A green), danger = color 1 ($28 yellow) */
-	colour = (flight_speed > (myship.max_speed * 2 / 3)) ? GFX_COL_YELLOW_1 : GFX_COL_GREEN_1;
-
-	for (i = 0; i < 6; i++)
-		gfx_draw_colour_line (sx, sy + 6 + i, sx + len, sy + 6 + i, colour);
-}
-
-
 /*
- * Draw an indicator bar.
- * Used for shields and energy banks.
+ * Dashboard gauges, laid out on the NES dashboard at 2x scale.
+ *
+ * Each bar is four NES tiles (64 pixels) long. Tile row R of the NES screen
+ * is at y = (R - 20) * 16 below SCANNER_Y, and the bar fill occupies lines
+ * 6-11 of that 16-line row. The left-hand gauges start at x = 16 and the
+ * right-hand ones at x = 432.
+ *
+ * As on the NES, a gauge whose value is in its danger range flashes.
  */
+
+#define DIAL_LEFT_X		16
+#define DIAL_RIGHT_X	432
+#define DIAL_ROW(r)		(((r) - 20) * 16)
 
 void display_dial_bar (int len, int x, int y, int colour)
 {
 	int i;
-	int base = y + SCANNER_Y;
+	int base = y + SCANNER_Y + 6;
 
-	/* NES pattern 236 (full bar) at 2x: fill is color 3 in rows 3-5
-	 * of the 8px tile = 2x rows 6-11. Color varies by gauge palette. */
+	if (len <= 0)
+		return;
+	if (len > 63)
+		len = 63;
+
 	for (i = 0; i < 6; i++)
-		gfx_draw_colour_line (x, base + 6 + i, x + len, base + 6 + i, colour);
+		gfx_draw_colour_line (x, base + i, x + len, base + i, colour);
 }
 
+static int dial_colour (int safe_colour, int danger)
+{
+	if (danger && (mcount & 2))
+		return GFX_COL_NES_AMBER;
+	return safe_colour;
+}
 
-/*
- * Display the current shield strengths.
- */
+void display_speed (void)
+{
+	/* The NES shows speed as 1.5 * DELTA, i.e. 60/64ths of the bar at
+	 * full speed, and never flags it as dangerous. */
+	display_dial_bar ((flight_speed * 60) / myship.max_speed,
+					  DIAL_RIGHT_X, DIAL_ROW(27), GFX_COL_NES_GREEN);
+}
 
 void display_shields (void)
 {
-	/* NES row 24 (FShield), row 25 (AShield): palette 1, color 3 = green
-	 * X = (2-1)*8*2 = 16, Y = (row-20)*16 */
-	if (front_shield > 3)
-		display_dial_bar (front_shield / 4, 16, 64, GFX_COL_GREEN_1);
-
-	if (aft_shield > 3)
-		display_dial_bar (aft_shield / 4, 16, 80, GFX_COL_GREEN_1);
+	display_dial_bar (front_shield / 4, DIAL_LEFT_X, DIAL_ROW(24),
+					  dial_colour (GFX_COL_NES_GREEN, front_shield < 32));
+	display_dial_bar (aft_shield / 4, DIAL_LEFT_X, DIAL_ROW(25),
+					  dial_colour (GFX_COL_NES_GREEN, aft_shield < 32));
 }
-
 
 void display_altitude (void)
 {
-	/* NES row 28, col 28: palette 3, color 3 = $1C (dark cyan)
-	 * X = 432, Y = (28-20)*16 = 128 */
-	if (myship.altitude > 3)
-		display_dial_bar (myship.altitude / 4, 432, 128, GFX_COL_GREEN_2);
+	display_dial_bar (myship.altitude / 4, DIAL_RIGHT_X, DIAL_ROW(28),
+					  dial_colour (GFX_COL_NES_CYAN, myship.altitude < 32));
 }
 
 void display_cabin_temp (void)
 {
-	/* NES row 27: palette 1, color 3 = green. Y = (27-20)*16 = 112 */
-	if (myship.cabtemp > 3)
-		display_dial_bar (myship.cabtemp / 4, 16, 112, GFX_COL_GREEN_1);
+	display_dial_bar (myship.cabtemp / 4, DIAL_LEFT_X, DIAL_ROW(27),
+					  dial_colour (GFX_COL_NES_GREEN, myship.cabtemp > 192));
 }
-
 
 void display_laser_temp (void)
 {
-	/* NES row 28: palette 1, color 3 = green. Y = (28-20)*16 = 128 */
-	if (laser_temp > 0)
-		display_dial_bar (laser_temp / 4, 16, 128, GFX_COL_GREEN_1);
+	display_dial_bar (laser_temp / 4, DIAL_LEFT_X, DIAL_ROW(28),
+					  dial_colour (GFX_COL_NES_GREEN, laser_temp > 192));
 }
 
-
-/*
- * Display the energy banks.
- */
-
+/* The NES has a single energy bar in place of the four energy banks. */
 void display_energy (void)
 {
-	int e1,e2,e3,e4;
-
-	e1 = energy > 64 ? 64 : energy;
-	e2 = energy > 128 ? 64 : energy - 64;
-	e3 = energy > 192 ? 64 : energy - 128;
-	e4 = energy - 192;  	
-	
-	/* NES row 26: palette 1, color 3 = green. Y = (26-20)*16 = 96 */
-	if (energy > 3)
-		display_dial_bar (energy / 4, 16, 96, GFX_COL_GREEN_1);
+	display_dial_bar (energy / 4, DIAL_LEFT_X, DIAL_ROW(26),
+					  dial_colour (GFX_COL_NES_GREEN, energy < 50));
 }
-
 
 
 /*
@@ -964,47 +966,50 @@ void display_flight_climb (void)
 
 void display_fuel (void)
 {
-	/* NES row 23: palette 3, color 3 = $1C (dark cyan). Y = (23-20)*16 = 48 */
-	if (cmdr.fuel > 0)
-		display_dial_bar ((cmdr.fuel * 64) / myship.max_fuel, 16, 48, GFX_COL_GREEN_2);
+	display_dial_bar ((cmdr.fuel * 63) / myship.max_fuel, DIAL_LEFT_X, DIAL_ROW(23),
+					  GFX_COL_NES_CYAN);
 }
 
 
+/*
+ * Missile indicators, NES style: a 2x2 block of slots at tile columns 30-31,
+ * rows 23-24. Missile 4 is top-left and missile 1 bottom-right; the highest
+ * numbered missile we still have is the active one.
+ *
+ *   empty slot      - left as the grey panel
+ *   missile ready   - black
+ *   seeking target  - flashes red and black
+ *   target locked   - red
+ */
 void display_missiles (void)
 {
-	int nomiss;
-	int i, img;
-
-	/* NES missiles in a 2x2 tile grid at cols 30-31, rows 23-24.
-	 * At 2x: x = 464,480; y = 48,64 relative to SCANNER_Y.
-	 * Missile 4=top-left, 3=top-right, 2=bottom-left, 1=bottom-right.
-	 * Sprites are 12x10, centered in 16x16 tile slots (+2,+3). */
 	static const int mx[4] = { 466, 482, 466, 482 };
 	static const int my[4] = {  51,  51,  67,  67 };
-
-	if (cmdr.missiles == 0)
-		return;
+	int nomiss;
+	int i;
 
 	nomiss = cmdr.missiles > 4 ? 4 : cmdr.missiles;
 
 	for (i = 0; i < nomiss; i++)
 	{
-		/* Missile numbering: slot 0=top-left (missile 4), slot 3=bottom-right (missile 1).
-		 * Draw from slot (4-nomiss) to slot 3. Active missile is the last one. */
 		int slot = 4 - nomiss + i;
+		int colour = GFX_COL_BLACK;
+
 		if (i == 0 && missile_target != MISSILE_UNARMED)
-			img = (missile_target < 0) ? IMG_MISSILE_YELLOW : IMG_MISSILE_RED;
-		else
-			img = IMG_MISSILE_GREEN;
-		gfx_draw_sprite(img, mx[slot], my[slot] + SCANNER_Y);
+		{
+			if (missile_target >= 0 || (mcount & 4))
+				colour = GFX_COL_RED;
+		}
+
+		gfx_draw_rectangle (mx[slot], my[slot] + SCANNER_Y,
+							mx[slot] + 11, my[slot] + SCANNER_Y + 9, colour);
 	}
 }
 
 
-
 void display_condition(void)
 {
-  static const int cc[] = { GFX_COL_BLACK, GFX_COL_GREEN_1, GFX_COL_YELLOW_1,
+  static const int cc[] = { GFX_COL_BLACK, GFX_COL_GREEN_1, GFX_COL_YELLOW_5,
 			    GFX_COL_RED, GFX_COL_RED };
   int c = cc[condition];
   if (condition == COND_ALERT && (mcount & 4))
@@ -1012,34 +1017,62 @@ void display_condition(void)
   gfx_draw_filled_circle(condition_x, condition_y, condition_r, c);
 }
 
+
 /*
- * Draw icon bar cursor highlight.
- * NES uses bracket sprites around the selected icon.
- * We draw a small triangle pointer below the icon bar.
+ * Icon bar.
+ *
+ * icon_bar_type selects the bar (0 = docked, 1 = flight, 2 = charts) and
+ * icon_bar_cursor the selected button (0-11). The twelve buttons are 40
+ * pixels apart at 2x scale. The NES marks the selected button with four
+ * corner sprites; here it gets a frame in the same pale yellow.
  */
-static void draw_icon_bar_cursor(void)
+static void draw_icon_bar (int y)
 {
 	extern int icon_bar_cursor;
-	/* Icon bar is 32 NES tiles wide = 512 pixels at 2x.
-	 * 12 icon slots, each ~2.6 tiles wide. NES uses 5*xIconBarPointer + 6.
-	 * At 2x: icon_x = (5 * (icon_bar_cursor * 4) + 6) * 2 = icon_bar_cursor * 40 + 12.
-	 * Each icon is about 40 pixels wide at 2x. */
-	int x = icon_bar_cursor * 40 + 28;  /* Center of icon slot at 2x */
-	int y = SCANNER_Y + 30;  /* Just below icon bar (icon bar is 32px tall at 2x) */
+	extern int icon_bar_type;
+	int x1 = icon_bar_cursor * 40 + 18;
+	int x2 = x1 + 37;
+	int y1 = y + 1;
+	int y2 = y + 28;
+	int c = GFX_COL_NES_POINTER;
 
-	/* Draw small downward-pointing triangle */
-	gfx_draw_colour_line(x - 4, y, x + 4, y, GFX_COL_WHITE);
-	gfx_draw_colour_line(x - 3, y + 1, x + 3, y + 1, GFX_COL_WHITE);
-	gfx_draw_colour_line(x - 2, y + 2, x + 2, y + 2, GFX_COL_WHITE);
-	gfx_draw_colour_line(x - 1, y + 3, x + 1, y + 3, GFX_COL_WHITE);
+	gfx_draw_icon_bar (icon_bar_type, y);
+
+	gfx_draw_colour_line (x1, y1, x2, y1, c);
+	gfx_draw_colour_line (x1, y1 + 1, x2, y1 + 1, c);
+	gfx_draw_colour_line (x1, y2 - 1, x2, y2 - 1, c);
+	gfx_draw_colour_line (x1, y2, x2, y2, c);
+	gfx_draw_colour_line (x1, y1, x1, y2, c);
+	gfx_draw_colour_line (x1 + 1, y1, x1 + 1, y2, c);
+	gfx_draw_colour_line (x2 - 1, y1, x2 - 1, y2, c);
+	gfx_draw_colour_line (x2, y1, x2, y2, c);
 }
 
 
+/*
+ * Draw whatever sits below the view: the full dashboard in the space
+ * layout, just the icon bar under the text screens, nothing on the title.
+ */
 void update_console (void)
 {
-	gfx_set_clip_region (0, 0, 512, 512);
+	int layout = gfx_get_layout();
+
+	update_condition();
+
+	if (layout == GFX_LAYOUT_TITLE)
+		return;
+
+	gfx_set_clip_region (0, 0, 511, N64_SCREEN_H - 1);
+
+	if (layout == GFX_LAYOUT_TEXT)
+	{
+		draw_icon_bar (ICON_BAR_TEXT_Y);
+		gfx_set_clip_region (1, 1, 510, GFX_VIEW_BY);
+		return;
+	}
+
 	gfx_draw_scanner();
-	draw_icon_bar_cursor();
+	draw_icon_bar (SCANNER_Y);
 
 	display_speed();
 	display_flight_climb();
@@ -1051,34 +1084,22 @@ void update_console (void)
 	display_laser_temp();
 	display_fuel();
 	display_missiles();
-	update_condition();
-	
-	if (docked) {
-	  gfx_set_clip_region (0, 0, 512, 512);
-	  return;
-	}
 
-	update_scanner();
-	update_compass();
-	display_condition();
-
+	if (!docked)
 	{
-	  char buf[5];
-	  sprintf(buf, "x%d", scanner_zoom);
-	  gfx_display_text(zoom_x, zoom_y, buf);
+		update_scanner();
+		update_compass();
+		display_condition();
+
+		if (scanner_zoom != 1)
+		{
+			char buf[5];
+			sprintf(buf, "x%d", scanner_zoom);
+			gfx_display_text(zoom_x, zoom_y, buf);
+		}
 	}
 
-	/* NES dashboard does not have these vanilla NewKind sprite indicators.
-	 * Station "S" and ECM "E" are shown differently on NES. */
-#if 0
-	if (ship_count[SHIP_CORIOLIS] || ship_count[SHIP_DODEC])
-		gfx_draw_sprite (IMG_BIG_S, 387, 490);
-
-	if (ecm_active)
-		gfx_draw_sprite (IMG_BIG_E, 115, 490);
-#endif
-
-	gfx_set_clip_region (0, 0, 512, 512);
+	gfx_set_clip_region (1, 1, 510, GFX_VIEW_BY);
 }
 
 void increase_flight_roll (void)
@@ -1174,12 +1195,12 @@ void display_hyper_status (void)
 		gfx_display_text (5, 5, str);
 		if (hyper_galactic)
 		{
-			gfx_display_centre_text (358, "Galactic Hyperspace", 120, GFX_COL_WHITE);
+			gfx_display_centre_text (GFX_MESSAGE_Y, "Galactic Hyperspace", 120, GFX_COL_WHITE);
 		}
 		else
 		{
 			sprintf (str, "Hyperspace - %s", hyper_name);
-			gfx_display_centre_text (358, str, 120, GFX_COL_WHITE);
+			gfx_display_centre_text (GFX_MESSAGE_Y, str, 120, GFX_COL_WHITE);
 		} 	
 	}
 	else

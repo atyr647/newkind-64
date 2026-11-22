@@ -82,11 +82,6 @@ void update_intro1 (void)
 		universe[0].location.z = 384;
 
 	gfx_clear_display();
-	/* Clear the full scanner/dashboard area (y=320-479) where intro text
-	 * is drawn (Y=310-360). gfx_clear_display() only clears to GFX_VIEW_BY
-	 * (319), so ship wireframe pixels would persist below that. */
-	gfx_clear_area(0, GFX_VIEW_BY + 1, 511, 479);
-
 	flight_roll = 1;
 	update_universe();
 
@@ -98,9 +93,9 @@ void update_intro1 (void)
 	{
 		extern int n64_save_exists(void);
 		if (n64_save_exists())
-			gfx_display_centre_text (350, "A=Load Saved Game  B=New Game", 140, GFX_COL_GOLD);
+			gfx_display_centre_text (350, "A: Load Game  Start: New Game", 140, GFX_COL_GOLD);
 		else
-			gfx_display_centre_text (350, "Press B to start.", 140, GFX_COL_GOLD);
+			gfx_display_centre_text (350, "Press Start", 140, GFX_COL_GOLD);
 	}
 #else
 	gfx_display_centre_text (360, "Load New Commander (Y/N)?", 140, GFX_COL_GOLD);
@@ -154,7 +149,6 @@ void update_intro2 (void)
 
 
 	gfx_clear_display();
-	gfx_clear_area(0, GFX_VIEW_BY + 1, 511, 479);
 	update_starfield();
 	update_universe();
 

@@ -150,7 +150,7 @@ void draw_wireframe_ship (struct univ_object *univ)
 		sy = -sy;
 
 		sx += 128;
-		sy += 96;
+		sy += GFX_VIEW_CY;
 
 		sx *= GFX_SCALE;
 		sy *= GFX_SCALE;
@@ -279,7 +279,7 @@ void draw_solid_ship (struct univ_object *univ)
 		sy = -sy;
 
 		sx += 128;
-		sy += 96;
+		sy += GFX_VIEW_CY;
 
 		sx *= GFX_SCALE;
 		sy *= GFX_SCALE;
@@ -372,7 +372,7 @@ void draw_solid_ship (struct univ_object *univ)
 	  double cz = univ->location.z;
 	  if (cz <= 0) cz = 1;
 	  cx = (cx * 256) / cz + 128;
-	  cy = -(cy * 256) / cz + 96;
+	  cy = -(cy * 256) / cz + GFX_VIEW_CY;
 	  gfx_draw_circle(cx * GFX_SCALE, cy * GFX_SCALE, sqrt(ship_list[univ->type]->size) * 256 /
 			  cz * GFX_SCALE, GFX_COL_RED);
 	}
@@ -623,21 +623,59 @@ void render_planet_line (int xo, int yo, int x, int y, int radius, int vx, int v
 	div = radius << 10;
 	if (div == 0) return;
 
+#ifdef PLATFORM_N64
 	{
-		int inv_div = (1 << 20) / div;
+		/*
+		 * The landscape coordinates change linearly along the line, so step
+		 * them in fixed point instead of dividing for every pixel. Pixels
+		 * are worked out in pairs (the planet is drawn two pixels wide,
+		 * like the 2x dashboard art) into a line buffer that is then
+		 * copied to the screen in one go.
+		 */
+		static unsigned short span[512];
+		const unsigned short *pal = gfx_palette16();
+		long long inv_div = (1LL << 32) / div;
+		long long fx = (long long)rx * inv_div;
+		long long fy = (long long)ry * inv_div;
+		long long dfx = (long long)vx * inv_div * 2;
+		long long dfy = (long long)vy * inv_div * 2;
+		int count = ex - sx + 1;
+		int i;
 
-		for (; sx <= ex; sx++)
+		for (i = 0; i < count; i += 2)
 		{
-			int lx = (int)(((long long)rx * inv_div) >> 20);
-			int ly = (int)(((long long)ry * inv_div) >> 20);
+			int lx = (int)(fx >> 32);
+			int ly = (int)(fy >> 32);
+			unsigned short c;
 
-			if ((unsigned)lx <= LAND_X_MAX && (unsigned)ly <= LAND_Y_MAX)
-				gfx_fast_plot_pixel(sx, sy, landscape[lx][ly]);
+			if (lx < 0) lx = 0;
+			if (lx > LAND_X_MAX) lx = LAND_X_MAX;
+			if (ly < 0) ly = 0;
+			if (ly > LAND_Y_MAX) ly = LAND_Y_MAX;
 
-			rx += vx;
-			ry += vy;
+			c = pal[landscape[lx][ly]];
+			span[i] = c;
+			span[i + 1] = c;
+
+			fx += dfx;
+			fy += dfy;
 		}
+
+		gfx_blit_span16 (sx, sy, span, count);
 	}
+#else
+	for (; sx <= ex; sx++)
+	{
+		int lx = rx / div;
+		int ly = ry / div;
+
+		if ((unsigned)lx <= LAND_X_MAX && (unsigned)ly <= LAND_Y_MAX)
+			gfx_fast_plot_pixel (sx, sy, landscape[lx][ly]);
+
+		rx += vx;
+		ry += vy;
+	}
+#endif
 }
 
 
@@ -711,7 +749,7 @@ void draw_planet (struct univ_object *planet)
 	y = -y;
 	
 	x += 128;
-	y += 96;
+	y += GFX_VIEW_CY;
 
 	x *= GFX_SCALE;
 	y *= GFX_SCALE;
@@ -754,7 +792,9 @@ void render_sun_line (int xo, int yo, int x, int y, int radius)
 	int distance;
 	int inner,outer;
 	int inner2;
+#ifndef PLATFORM_N64
 	int mix;
+#endif
 
 	if ((sy < GFX_VIEW_TY + GFX_Y_OFFSET) ||
 		(sy > GFX_VIEW_BY + GFX_Y_OFFSET))
@@ -788,6 +828,32 @@ void render_sun_line (int xo, int yo, int x, int y, int radius)
 	dy = y * y;
 	dx = sx - xo;
 	
+#ifdef PLATFORM_N64
+	{
+		static unsigned short span[512];
+		const unsigned short *pal = gfx_palette16();
+		int count = ex - sx + 1;
+		int i;
+
+		for (i = 0; i < count; i++, dx++)
+		{
+			distance = dx * dx + dy;
+
+			if (distance < inner)
+				colour = GFX_COL_WHITE;
+			else if (distance < inner2)
+				colour = GFX_COL_YELLOW_4;
+			else if (distance < outer)
+				colour = GFX_ORANGE_3;
+			else
+				colour = (((sx + i) ^ y) & 1) ? GFX_ORANGE_1 : GFX_ORANGE_2;
+
+			span[i] = pal[colour];
+		}
+
+		gfx_blit_span16 (sx, sy, span, count);
+	}
+#else
 	for (; sx <= ex; sx++,dx++)
 	{
 		mix = (sx ^ y) & 1;
@@ -803,7 +869,8 @@ void render_sun_line (int xo, int yo, int x, int y, int radius)
 			colour = mix ? GFX_ORANGE_1 : GFX_ORANGE_2;
 		
 		gfx_fast_plot_pixel (sx, sy, colour);
-	} 	
+	}
+#endif
 }
 
 
@@ -850,7 +917,7 @@ void draw_sun (struct univ_object *planet)
 	y = -y;
 	
 	x += 128;
-	y += 96;
+	y += GFX_VIEW_CY;
 
 	x *= GFX_SCALE;
 	y *= GFX_SCALE;
@@ -964,7 +1031,7 @@ void draw_explosion (struct univ_object *univ)
 			sy = -sy;
 
 			sx += 128;
-			sy += 96;
+			sy += GFX_VIEW_CY;
 
 			sx *= GFX_SCALE;
 			sy *= GFX_SCALE;

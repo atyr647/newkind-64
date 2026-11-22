@@ -38,12 +38,35 @@ static timer_link_t *frame_timer_handle;
 /* Clipping region */
 static int clip_tx, clip_ty, clip_bx, clip_by;
 
-/* Scanner image data - loaded from ROM filesystem (BMP converted to raw) */
-static uint8_t *scanner_pixels;  /* indexed color pixel data */
+/* Dashboard and icon bar art, loaded from the ROM filesystem and converted
+ * to RGBA5551 once so they can be blitted with plain row copies. */
+static uint16_t *scanner_rgba;   /* 512x160: flight icon bar + dashboard */
 static int scanner_w, scanner_h;
+static uint16_t *iconbar_rgba;   /* 512x96: docked, flight, charts icon bars */
+static int iconbar_w, iconbar_h;
 
 /* Palette loaded from scanner BMP */
 static uint8_t bmp_palette[256][4]; /* RGBX */
+
+/* Current layout (see gfx.h). */
+int gfx_view_by = GFX_TEXT_VIEW_BY;
+int gfx_y_centre = (GFX_TEXT_VIEW_BY + 1) / 2;
+static int cur_layout = GFX_LAYOUT_TITLE;
+
+/*
+ * Presentation state.
+ *
+ * Normally everything is drawn into the private framebuf, which is copied to
+ * a display surface when the frame is shown. That lets text screens be drawn
+ * once and left alone. The space views redraw themselves completely every
+ * frame, so for those the main loop asks (gfx_request_direct_frame) to draw
+ * straight into the next display surface and skip the copy.
+ */
+static surface_t *cur_surface;   /* surface acquired for the frame being drawn */
+static int direct_mode;          /* 1 = active_fb points into cur_surface */
+static int direct_hint;          /* one-shot request for the next frame */
+static int direct_frames;        /* consecutive direct frames so far */
+#define NUM_DISPLAY_BUFFERS 3
 
 #define MAX_POLYS	100
 
@@ -67,85 +90,79 @@ static struct poly_data poly_chain[MAX_POLYS];
  * The BMP is an 8-bit indexed color image (256 colors).
  * This gives us the authentic Elite palette used by all game graphics.
  */
-static int load_scanner_bmp(const char *filename)
+static uint16_t *load_bmp(const char *filename, int *out_w, int *out_h, int set_palette)
 {
 	FILE *fp;
 	uint8_t header[54];
+	uint8_t pal[256][4];
+	uint16_t pal16[256];
+	uint8_t *rowbuf;
+	uint16_t *out;
 	int width, height, bpp, offset;
-	int row;
-	int padding;
+	int row, x, rowsize;
 	char path[64];
 
-	/* In libdragon, files in the DFS are accessed via "rom:/" prefix */
 	snprintf(path, sizeof(path), "rom:/%s", filename);
 	fp = fopen(path, "rb");
 	if (!fp)
-		return -1;
+		return NULL;
 
-	/* Read BMP header */
 	if (fread(header, 1, 54, fp) != 54)
 	{
 		fclose(fp);
-		return -1;
+		return NULL;
 	}
 
-	/* Parse BMP header */
 	offset = header[10] | (header[11] << 8) | (header[12] << 16) | (header[13] << 24);
 	width = header[18] | (header[19] << 8) | (header[20] << 16) | (header[21] << 24);
 	height = header[22] | (header[23] << 8) | (header[24] << 16) | (header[25] << 24);
 	bpp = header[28] | (header[29] << 8);
 
-	if (bpp != 8)
+	if (bpp != 8 || width <= 0 || height <= 0 || fread(pal, 4, 256, fp) != 256)
 	{
 		fclose(fp);
-		return -1;
+		return NULL;
 	}
 
-	/* Read palette (256 entries, 4 bytes each: BGRA) */
-	fread(bmp_palette, 4, 256, fp);
-
-	/* Convert palette to RGBA5551 */
-	for (int i = 0; i < 256; i++)
+	/* Palette entries are BGRX; convert to RGBA5551. */
+	for (x = 0; x < 256; x++)
 	{
-		int b = bmp_palette[i][0];
-		int g = bmp_palette[i][1];
-		int r = bmp_palette[i][2];
-		int r5 = (r >> 3) & 0x1F;
-		int g5 = (g >> 3) & 0x1F;
-		int b5 = (b >> 3) & 0x1F;
-		/* RGBA5551: RRRRR GGGGG BBBBB A */
-		palette_rgba16[i] = (r5 << 11) | (g5 << 6) | (b5 << 1) | (i ? 1 : 0);
+		int r5 = pal[x][2] >> 3, g5 = pal[x][1] >> 3, b5 = pal[x][0] >> 3;
+		pal16[x] = (r5 << 11) | (g5 << 6) | (b5 << 1) | (x ? 1 : 0);
 	}
 
-	/* Allocate pixel data */
-	scanner_w = width;
-	scanner_h = abs(height);
-	scanner_pixels = (uint8_t *)malloc(scanner_w * scanner_h);
-	if (!scanner_pixels)
+	if (set_palette)
 	{
+		memcpy(bmp_palette, pal, sizeof(bmp_palette));
+		memcpy(palette_rgba16, pal16, sizeof(palette_rgba16));
+	}
+
+	rowsize = (width + 3) & ~3;
+	rowbuf = malloc(rowsize);
+	out = malloc(width * height * sizeof(uint16_t));
+	if (!rowbuf || !out)
+	{
+		free(rowbuf);
+		free(out);
 		fclose(fp);
-		return -1;
+		return NULL;
 	}
 
-	/* Seek to pixel data */
+	/* BMP rows are stored bottom-up. */
 	fseek(fp, offset, SEEK_SET);
-
-	/* BMP rows are padded to 4-byte boundaries */
-	padding = (4 - (width % 4)) % 4;
-
-	/* BMP is stored bottom-up */
-	for (row = scanner_h - 1; row >= 0; row--)
+	for (row = height - 1; row >= 0; row--)
 	{
-		fread(&scanner_pixels[row * scanner_w], 1, scanner_w, fp);
-		if (padding > 0)
-		{
-			uint8_t pad[4];
-			fread(pad, 1, padding, fp);
-		}
+		if (fread(rowbuf, 1, rowsize, fp) != (size_t)rowsize)
+			break;
+		for (x = 0; x < width; x++)
+			out[row * width + x] = pal16[rowbuf[x]];
 	}
 
+	free(rowbuf);
 	fclose(fp);
-	return 0;
+	*out_w = width;
+	*out_h = height;
+	return out;
 }
 
 
@@ -192,15 +209,9 @@ static inline void fb_putpixel(int x, int y, int col)
 		active_fb[y * N64_SCREEN_W + x] = palette_rgba16[col];
 }
 
-/* Fast pixel set without clipping (for internal use) */
-static inline void fb_putpixel_fast(int x, int y, int col)
-{
-	if (x >= 0 && x < N64_SCREEN_W && y >= 0 && y < N64_SCREEN_H)
-		active_fb[y * N64_SCREEN_W + x] = palette_rgba16[col];
-}
-
-
 /* Fast 64-bit framebuffer copy. */
+extern const uint8_t n64_font_8x8[];
+
 static void fast_framebuf_copy(void *dst, const void *src, int nbytes)
 {
 	const uint64_t *s = (const uint64_t *)src;
@@ -218,34 +229,26 @@ static void fast_framebuf_copy(void *dst, const void *src, int nbytes)
 	}
 }
 
-/* Widescreen flag from boot menu */
-extern int n64_widescreen;
-
 int gfx_graphics_startup(void)
 {
-	/* Initialize N64 display at 640x480 interlaced, 16-bit color, 3 buffers.
-	 * Use ANTIALIAS_OFF for crisp pixel rendering.
-	 *
-	 * In widescreen mode, we still render at 640x480 but the N64 VI
-	 * stretches this to fill a 16:9 display. The game content is
-	 * pre-squished horizontally so it looks correct on widescreen TVs.
-	 * Since the game's internal coordinates are 512x384 centered in
-	 * 640x480, on a 16:9 TV the image will appear wider and shorter
-	 * which actually helps with the vertical clipping issue. */
-	display_init(RESOLUTION_640x480, DEPTH_16_BPP, 3, GAMMA_NONE, FILTERS_RESAMPLE);
+	/* 640x480 interlaced, 16-bit colour. */
+	display_init(RESOLUTION_640x480, DEPTH_16_BPP, NUM_DISPLAY_BUFFERS, GAMMA_NONE, FILTERS_RESAMPLE);
 
-	/* Try to load palette from the scanner BMP (the authentic Elite palette) */
-	if (load_scanner_bmp(scanner_filename) != 0)
-	{
-		if (load_scanner_bmp("scanner.bmp") != 0)
-		{
-			init_default_palette();
-		}
-	}
+	/* The dashboard BMP carries the game palette (the original Elite palette
+	 * plus the private NES dashboard colours). */
+	scanner_rgba = load_bmp(scanner_filename, &scanner_w, &scanner_h, 1);
+	if (!scanner_rgba)
+		scanner_rgba = load_bmp("scanner.bmp", &scanner_w, &scanner_h, 1);
+	if (!scanner_rgba)
+		init_default_palette();
+
+	iconbar_rgba = load_bmp("iconbar.bmp", &iconbar_w, &iconbar_h, 0);
 
 	/* Clear framebuffer */
 	memset(framebuf, 0, sizeof(framebuf));
 	active_fb = framebuf;
+	cur_surface = NULL;
+	direct_mode = direct_hint = direct_frames = 0;
 
 	/* Set default clip region to full screen */
 	clip_tx = 0;
@@ -266,32 +269,176 @@ int gfx_graphics_startup(void)
 
 void gfx_graphics_shutdown(void)
 {
-	if (scanner_pixels)
-	{
-		free(scanner_pixels);
-		scanner_pixels = NULL;
-	}
+	free(scanner_rgba);
+	scanner_rgba = NULL;
+	free(iconbar_rgba);
+	iconbar_rgba = NULL;
 	display_close();
 }
 
 
 void gfx_acquire_screen(void)
 {
-	/* No-op - we always render to the private framebuf */
+	/* No-op - see gfx_update_screen */
 }
+
+/*
+ * Display surfaces live in uncached memory. That is the right place to
+ * copy whole frames to (a cached write would first have to read every
+ * line in), so the frame copy goes straight there.
+ *
+ * For drawing directly into a surface, DIRECT_CACHED selects whether the
+ * pixels are written through the cached alias (flushed before the surface
+ * is shown) or straight to uncached memory.
+ */
+#ifndef DIRECT_CACHED
+#define DIRECT_CACHED 0
+#endif
+
+static uint16_t *surface_pixels(surface_t *s)
+{
+#if DIRECT_CACHED
+	return (uint16_t *)CachedAddr(s->buffer);
+#else
+	return (uint16_t *)s->buffer;
+#endif
+}
+
+void gfx_request_direct_frame(void)
+{
+	direct_hint = 1;
+}
+
+/* Stop drawing into the display surface and go back to the private
+ * framebuf, optionally carrying the picture drawn so far across. */
+static void leave_direct_mode(int keep_picture)
+{
+	if (!direct_mode)
+		return;
+	if (keep_picture)
+		memcpy(framebuf, surface_pixels(cur_surface), sizeof(framebuf));
+	active_fb = framebuf;
+	direct_mode = 0;
+	direct_frames = 0;
+}
+
+#ifdef N64_SHOW_FPS
+/*
+ * Developer overlay (make -f Makefile.n64 EXTRA_CFLAGS=-DN64_SHOW_FPS): frames per
+ * second, measured in real time over the last 30 frames.
+ */
+static void draw_string(int px, int py, const char *txt, int col, int big);
+
+static void draw_fps_overlay(void)
+{
+	static int frames, fps10;
+	static long long t0;
+	char buf[32];
+	int y;
+	int ctx = clip_tx, cty = clip_ty, cbx = clip_bx, cby = clip_by;
+
+	if (++frames >= 30)
+	{
+		long long t = timer_ticks();
+		if (t0)
+			fps10 = (int)(300LL * TICKS_PER_SECOND / (t - t0));
+		t0 = t;
+		frames = 0;
+	}
+
+	snprintf(buf, sizeof(buf), "%d.%d fps L%d C%d", fps10 / 10, fps10 % 10, cur_layout, gfx_y_centre);
+	for (y = 14; y < 26; y++)
+		memset(&active_fb[y * N64_SCREEN_W + 70], 0, 160 * sizeof(uint16_t));
+	clip_tx = 0; clip_ty = 0; clip_bx = N64_SCREEN_W - 1; clip_by = N64_SCREEN_H - 1;
+	draw_string(72, 13, buf, GFX_COL_WHITE, 0);
+	clip_tx = ctx; clip_ty = cty; clip_bx = cbx; clip_by = cby;
+}
+#endif
 
 void gfx_update_screen(void)
 {
-	surface_t *disp;
+	extern void snd_update_sound(void);
+	int want_direct = direct_hint;
+
+	direct_hint = 0;
+
+#ifdef N64_SHOW_FPS
+	draw_fps_overlay();
+#endif
+
+	/* Keep the audio mixer fed from every loop that shows frames. */
+	snd_update_sound();
 
 	/* display_get() blocks until a buffer is free (~vsync locked). */
-	disp = display_get();
+	if (!cur_surface)
+		cur_surface = display_get();
 
-	/* Flush framebuf from CPU cache, then fast-copy to display surface. */
-	data_cache_hit_writeback(framebuf, sizeof(framebuf));
-	fast_framebuf_copy(disp->buffer, framebuf, N64_SCREEN_W * N64_SCREEN_H * 2);
+	if (direct_mode)
+	{
+#if DIRECT_CACHED
+		data_cache_hit_writeback_invalidate(surface_pixels(cur_surface), sizeof(framebuf));
+#endif
+		if (!want_direct)
+			leave_direct_mode(1);
+	}
+	else
+	{
+		fast_framebuf_copy(cur_surface->buffer, framebuf, sizeof(framebuf));
+	}
 
-	display_show(disp);
+	display_show(cur_surface);
+	cur_surface = NULL;
+
+	if (want_direct)
+	{
+		cur_surface = display_get();
+		active_fb = surface_pixels(cur_surface);
+		direct_mode = 1;
+
+		/* Each display buffer still holds whatever was shown a few frames
+		 * ago, so wipe each one the first time it is used directly. */
+		if (direct_frames < NUM_DISPLAY_BUFFERS)
+		{
+			memset(active_fb, 0, sizeof(framebuf));
+			direct_frames++;
+		}
+	}
+}
+
+
+/*
+ * Switch between the SPACE and TEXT layouts (see gfx.h). Changing layout
+ * wipes the whole play field so nothing from the old layout is left behind.
+ */
+void gfx_set_layout(int layout)
+{
+	int was_space = (cur_layout == GFX_LAYOUT_SPACE);
+	int is_space = (layout == GFX_LAYOUT_SPACE);
+
+	if (layout == cur_layout)
+		return;
+
+	/* Text screens are drawn once and kept, so they need the framebuf. */
+	if (!is_space)
+		leave_direct_mode(0);
+
+	cur_layout = layout;
+	gfx_view_by = is_space ? GFX_SPACE_VIEW_BY : GFX_TEXT_VIEW_BY;
+	gfx_y_centre = (gfx_view_by + 1) / 2;
+
+	if (was_space != is_space || layout == GFX_LAYOUT_TITLE)
+	{
+		int y;
+		for (y = 0; y < N64_SCREEN_H; y++)
+			memset(&active_fb[y * N64_SCREEN_W + GFX_X_OFFSET], 0, 512 * sizeof(uint16_t));
+	}
+
+	gfx_set_clip_region(1, 1, 510, gfx_view_by);
+}
+
+int gfx_get_layout(void)
+{
+	return cur_layout;
 }
 
 
@@ -300,6 +447,21 @@ void gfx_release_screen(void)
 	/* No-op on N64 - release is handled by gfx_update_screen */
 }
 
+
+/*
+ * Fast paths for the planet and sun renderers, which fill whole spans:
+ * they look colours up themselves and hand over finished pixels a row
+ * at a time. No clipping - the caller has already clipped to the view.
+ */
+const uint16_t *gfx_palette16(void)
+{
+	return palette_rgba16;
+}
+
+void gfx_blit_span16(int x, int y, const uint16_t *pixels, int count)
+{
+	memcpy(&active_fb[y * N64_SCREEN_W + x], pixels, count * sizeof(uint16_t));
+}
 
 void gfx_fast_plot_pixel(int x, int y, int col)
 {
@@ -589,9 +751,10 @@ void gfx_draw_rectangle(int tx, int ty, int bx, int by, int col)
  * Used for both ELITE_1 (normal 8px text) and ELITE_2 (title text).
  * At 640x480 the 8x8 font is a faithful representation for both sizes.
  */
-extern const uint8_t n64_font_8x8[];
-
-static void draw_char(int x, int y, char ch, int col)
+/*
+ * Draw one glyph of the 8x8 font, optionally doubled to 16x16.
+ */
+static void draw_char(int x, int y, char ch, int col, int big)
 {
 	int cx, cy;
 	const uint8_t *glyph;
@@ -603,62 +766,79 @@ static void draw_char(int x, int y, char ch, int col)
 	for (cy = 0; cy < 8; cy++)
 	{
 		uint8_t row = glyph[cy];
+		if (!row)
+			continue;
 		for (cx = 0; cx < 8; cx++)
 		{
-			if (row & (0x80 >> cx))
+			if (!(row & (0x80 >> cx)))
+				continue;
+			if (big)
+			{
+				int px = x + cx * 2, py = y + cy * 2;
+				fb_putpixel(px, py, col);
+				fb_putpixel(px + 1, py, col);
+				fb_putpixel(px, py + 1, col);
+				fb_putpixel(px + 1, py + 1, col);
+			}
+			else
 				fb_putpixel(x + cx, y + cy, col);
 		}
+	}
+}
+
+/*
+ * The original text screens were laid out for a font about 14 pixels tall
+ * (highlight bars span y-1..y+14). The 8x8 font is dropped by this much so
+ * it sits in the middle of that line instead of hugging the top of it.
+ */
+#define SMALL_TEXT_DROP	3
+
+static void draw_string(int px, int py, const char *txt, int col, int big)
+{
+	int step = big ? 16 : 8;
+
+	if (!big)
+		py += SMALL_TEXT_DROP;
+
+	while (*txt)
+	{
+		draw_char(px, py, *txt, col, big);
+		px += step;
+		txt++;
 	}
 }
 
 
 void gfx_display_text(int x, int y, char *txt)
 {
-	int px = (x / (2 / GFX_SCALE)) + GFX_X_OFFSET;
-	int py = (y / (2 / GFX_SCALE)) + GFX_Y_OFFSET;
-
-	while (*txt)
-	{
-		draw_char(px, py, *txt, GFX_COL_WHITE);
-		px += 8;
-		txt++;
-	}
+	draw_string((x / (2 / GFX_SCALE)) + GFX_X_OFFSET,
+	            (y / (2 / GFX_SCALE)) + GFX_Y_OFFSET, txt, GFX_COL_WHITE, 0);
 }
 
 
 void gfx_display_colour_text(int x, int y, char *txt, int col)
 {
-	int px = (x / (2 / GFX_SCALE)) + GFX_X_OFFSET;
-	int py = (y / (2 / GFX_SCALE)) + GFX_Y_OFFSET;
-
-	while (*txt)
-	{
-		draw_char(px, py, *txt, col);
-		px += 8;
-		txt++;
-	}
+	draw_string((x / (2 / GFX_SCALE)) + GFX_X_OFFSET,
+	            (y / (2 / GFX_SCALE)) + GFX_Y_OFFSET, txt, col, 0);
 }
 
 
+/*
+ * Centred text. psize 140 is the original's large gold heading font; here
+ * that is the same font doubled (as long as the line fits), which is also
+ * how the NES draws all its text.
+ */
 void gfx_display_centre_text(int y, char *str, int psize, int col)
 {
 	int len = strlen(str);
-	int txt_colour = col;
+	int big = (psize == 140) && (len * 16 <= 500);
 	int py = (y / (2 / GFX_SCALE)) + GFX_Y_OFFSET;
-	int px;
+	int px = (128 * GFX_SCALE) + GFX_X_OFFSET - (len * (big ? 8 : 4));
 
-	/* psize 140 = large title font; use same font but different color */
 	if (psize == 140)
-		txt_colour = GFX_COL_GOLD;
+		col = GFX_COL_GOLD;
 
-	px = (128 * GFX_SCALE) + GFX_X_OFFSET - (len * 4);
-
-	while (*str)
-	{
-		draw_char(px, py, *str, txt_colour);
-		px += 8;
-		str++;
-	}
+	draw_string(px, py, str, col, big);
 }
 
 
@@ -671,16 +851,58 @@ static void fast_clear_region(int x1, int y1, int x2, int y2)
 		memset(&active_fb[y * N64_SCREEN_W + x1], 0, w_bytes);
 }
 
-void gfx_clear_display(void)
+/*
+ * Pick the layout that goes with the screen about to be drawn. Every screen
+ * starts by calling gfx_clear_display(), so this is the one place that has
+ * to know which screens use which layout.
+ */
+static void sync_layout(void)
 {
-	fast_clear_region(GFX_X_OFFSET + 1, GFX_Y_OFFSET + 1,
-	                  GFX_X_OFFSET + 510, GFX_Y_OFFSET + GFX_VIEW_BY);
+	switch (current_screen)
+	{
+		case SCR_FRONT_VIEW:
+		case SCR_REAR_VIEW:
+		case SCR_LEFT_VIEW:
+		case SCR_RIGHT_VIEW:
+		case SCR_BREAK_PATTERN:
+		case SCR_ESCAPE_POD:
+		case SCR_GAME_OVER:
+			gfx_set_layout(GFX_LAYOUT_SPACE);
+			break;
+
+		case SCR_INTRO_ONE:
+		case SCR_INTRO_TWO:
+			gfx_set_layout(GFX_LAYOUT_TITLE);
+			break;
+
+		default:
+			gfx_set_layout(GFX_LAYOUT_TEXT);
+			break;
+	}
 }
 
+void gfx_clear_display(void)
+{
+	sync_layout();
+
+	if (cur_layout == GFX_LAYOUT_SPACE)
+	{
+		fast_clear_region(GFX_X_OFFSET, GFX_Y_OFFSET,
+		                  GFX_X_OFFSET + 511, GFX_Y_OFFSET + GFX_SPACE_VIEW_BY);
+	}
+	else
+	{
+		/* Everything above the icon bar. */
+		fast_clear_region(GFX_X_OFFSET, GFX_Y_OFFSET,
+		                  GFX_X_OFFSET + 511, GFX_Y_OFFSET + ICON_BAR_TEXT_Y - 1);
+	}
+}
+
+/* The two status lines at the bottom of the charts and market screens. */
 void gfx_clear_text_area(void)
 {
-	fast_clear_region(GFX_X_OFFSET + 1, GFX_Y_OFFSET + GFX_VIEW_BY - 42,
-	                  GFX_X_OFFSET + 510, GFX_Y_OFFSET + GFX_VIEW_BY);
+	fast_clear_region(GFX_X_OFFSET + 1, GFX_Y_OFFSET + gfx_view_by - 43,
+	                  GFX_X_OFFSET + 510, GFX_Y_OFFSET + gfx_view_by);
 }
 
 void gfx_clear_area(int tx, int ty, int bx, int by)
@@ -738,40 +960,33 @@ void gfx_display_pretty_text(int tx, int ty, int bx, int by, char *txt)
 }
 
 
+static void blit_rows(const uint16_t *src, int w, int rows, int dst_y)
+{
+	int y;
+
+	if (w > 512)
+		w = 512;
+	for (y = 0; y < rows; y++, dst_y++)
+	{
+		if (dst_y < 0 || dst_y >= N64_SCREEN_H)
+			continue;
+		memcpy(&active_fb[dst_y * N64_SCREEN_W + GFX_X_OFFSET], src + y * w, w * sizeof(uint16_t));
+	}
+}
+
+/* Draw the dashboard (flight icon bar, gauges and scanner). */
 void gfx_draw_scanner(void)
 {
-	int x, y;
-	int dst_x, dst_y;
+	if (scanner_rgba)
+		blit_rows(scanner_rgba, scanner_w, scanner_h, SCANNER_Y + GFX_Y_OFFSET);
+}
 
-	if (!scanner_pixels)
+/* Draw one of the icon bars (0 = docked, 1 = flight, 2 = charts) at line y. */
+void gfx_draw_icon_bar(int type, int y)
+{
+	if (!iconbar_rgba || type < 0 || (type + 1) * ICON_BAR_H > iconbar_h)
 		return;
-
-	/* Set clip region to the scanner area */
-	int old_ctx = clip_tx, old_cty = clip_ty, old_cbx = clip_bx, old_cby = clip_by;
-
-	clip_tx = GFX_X_OFFSET;
-	clip_ty = SCANNER_Y + GFX_Y_OFFSET;
-	clip_bx = GFX_X_OFFSET + scanner_w - 1;
-	if (clip_bx >= N64_SCREEN_W) clip_bx = N64_SCREEN_W - 1;
-	clip_by = GFX_Y_OFFSET + SCANNER_Y + scanner_h - 1;
-	if (clip_by >= N64_SCREEN_H) clip_by = N64_SCREEN_H - 1;
-
-	/* Blit the scanner bitmap */
-	for (y = 0; y < scanner_h; y++)
-	{
-		dst_y = SCANNER_Y + GFX_Y_OFFSET + y;
-		if (dst_y >= N64_SCREEN_H) break;
-		for (x = 0; x < scanner_w; x++)
-		{
-			dst_x = GFX_X_OFFSET + x;
-			if (dst_x >= N64_SCREEN_W) break;
-			active_fb[dst_y * N64_SCREEN_W + dst_x] = palette_rgba16[scanner_pixels[y * scanner_w + x]];
-		}
-	}
-
-	/* Restore clip region */
-	clip_tx = old_ctx; clip_ty = old_cty;
-	clip_bx = old_cbx; clip_by = old_cby;
+	blit_rows(iconbar_rgba + type * ICON_BAR_H * iconbar_w, iconbar_w, ICON_BAR_H, y + GFX_Y_OFFSET);
 }
 
 

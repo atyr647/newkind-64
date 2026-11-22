@@ -950,7 +950,7 @@ int fire_laser (void)
 				energy--;
 			
 			laser_x = ((rand() & 3) + 128 - 2) * GFX_SCALE;
-			laser_y = ((rand() & 3) + 96 - 2) * GFX_SCALE;
+			laser_y = ((rand() & 3) + GFX_VIEW_CY - 2) * GFX_SCALE;
 			
 			return 2;
 		}

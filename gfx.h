@@ -28,18 +28,58 @@
 
 #ifdef RES_640_480
 
+/*
+ * N64 layout: a 512-pixel wide play field centred on a 640x480 screen.
+ *
+ * There are two layouts, switched at run time by gfx_set_layout():
+ *
+ *   SPACE - the four space views, launch/hyperspace tunnel, escape pod and
+ *           game over. The view is 512x320 with the NES-style dashboard
+ *           (icon bar + gauges + scanner) below it at SCANNER_Y.
+ *
+ *   TEXT  - every other screen. The view is the full 512x384 area that the
+ *           original New Kind text screens were laid out for, with only the
+ *           icon bar underneath (as on the NES, the dashboard is hidden).
+ *
+ * GFX_VIEW_BY and GFX_Y_CENTRE therefore follow the current layout.
+ */
+
 #define GFX_SCALE		(2)
 #define GFX_X_OFFSET	(64)
 #define GFX_Y_OFFSET	(0)
 #define GFX_X_CENTRE	(256)
-#define GFX_Y_CENTRE	(160)
+
+extern int gfx_view_by;
+extern int gfx_y_centre;
+
+#define GFX_Y_CENTRE	(gfx_y_centre)
+#define GFX_VIEW_CY		(gfx_y_centre / GFX_SCALE)	/* view centre in 256x192 units */
 
 #define GFX_VIEW_TX		1
 #define GFX_VIEW_TY		1
 #define GFX_VIEW_BX		509
-#define GFX_VIEW_BY		319
+#define GFX_VIEW_BY		(gfx_view_by)
 
-#define SCANNER_Y		320
+#define GFX_SPACE_VIEW_BY	319		/* last line of the space view */
+#define GFX_TEXT_VIEW_BY	383		/* last line of the text screens */
+
+#define SCANNER_Y		320		/* top of dashboard in the SPACE layout */
+#define ICON_BAR_H		32
+#define ICON_BAR_TEXT_Y	432		/* top of icon bar in the TEXT layout */
+
+/* Where one-line messages go: near the bottom of whichever view is showing. */
+#define GFX_MESSAGE_Y	(gfx_view_by - 25)
+
+#define GFX_LAYOUT_SPACE	0
+#define GFX_LAYOUT_TEXT		1
+#define GFX_LAYOUT_TITLE	2		/* as TEXT, but no icon bar */
+
+void gfx_set_layout (int layout);
+int gfx_get_layout (void);
+void gfx_draw_icon_bar (int type, int y);
+void gfx_request_direct_frame (void);
+const unsigned short *gfx_palette16 (void);
+void gfx_blit_span16 (int x, int y, const unsigned short *pixels, int count);
 
 #define N64_SCREEN_W	640
 #define N64_SCREEN_H	480
@@ -151,6 +191,18 @@
 
 #define GFX_COL_PINK_1		183
 
+/* NES dashboard colours. These slots are private to the dashboard art
+ * (see build_dashboard.py); no ship, planet, sprite or text uses them. */
+#define GFX_COL_NES_GREEN	224
+#define GFX_COL_NES_RED		225
+#define GFX_COL_NES_GREY	226
+#define GFX_COL_NES_DGREY	227
+#define GFX_COL_NES_BLUE	228
+#define GFX_COL_NES_LABEL	229
+#define GFX_COL_NES_CYAN	230
+#define GFX_COL_NES_POINTER	231
+#define GFX_COL_NES_AMBER	232
+
 #define IMG_GREEN_DOT		1
 #define IMG_RED_DOT			2
 #define IMG_BIG_S			3
@@ -165,6 +217,11 @@
 
 int gfx_graphics_startup (void);
 void gfx_graphics_shutdown (void);
+#ifndef GFX_VIEW_CY
+#define GFX_VIEW_CY		96		/* view centre in 256x192 units */
+#define GFX_MESSAGE_Y	358
+#endif
+
 void gfx_update_screen (void);
 void gfx_acquire_screen (void);
 void gfx_release_screen (void);

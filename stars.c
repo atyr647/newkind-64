@@ -91,7 +91,7 @@ void front_starfield (void)
 		zz = stars[i].z;
 
 		sx += 128;
-		sy += 96;
+		sy += GFX_VIEW_CY;
 
 		sx *= GFX_SCALE;
 		sy *= GFX_SCALE;
@@ -136,7 +136,7 @@ void front_starfield (void)
 
 		
 		if (warp_stars)
-			gfx_draw_line (sx, sy, (xx + 128) * GFX_SCALE, (yy + 96) * GFX_SCALE);
+			gfx_draw_line (sx, sy, (xx + 128) * GFX_SCALE, (yy + GFX_VIEW_CY) * GFX_SCALE);
 		
 		sx = xx;
 		sy = yy;
@@ -191,7 +191,7 @@ void rear_starfield (void)
 		zz = stars[i].z;
 
 		sx += 128;
-		sy += 96;
+		sy += GFX_VIEW_CY;
 
 		sx *= GFX_SCALE;
 		sy *= GFX_SCALE;
@@ -236,13 +236,13 @@ void rear_starfield (void)
 			ey = yy;
 			ex = xx;
 			ex = (ex + 128) * GFX_SCALE;
-			ey = (ey + 96) * GFX_SCALE;
+			ey = (ey + GFX_VIEW_CY) * GFX_SCALE;
 
 			if ((sx >= GFX_VIEW_TX) && (sx <= GFX_VIEW_BX) &&
 			   (sy >= GFX_VIEW_TY) && (sy <= GFX_VIEW_BY) &&
 			   (ex >= GFX_VIEW_TX) && (ex <= GFX_VIEW_BX) &&
 			   (ey >= GFX_VIEW_TY) && (ey <= GFX_VIEW_BY))
-				gfx_draw_line (sx, sy, (xx + 128) * GFX_SCALE, (yy + 96) * GFX_SCALE);
+				gfx_draw_line (sx, sy, (xx + 128) * GFX_SCALE, (yy + GFX_VIEW_CY) * GFX_SCALE);
 		}
 		
 		stars[i].y = yy;
@@ -306,7 +306,7 @@ void side_starfield (void)
 		zz = stars[i].z;
 
 		sx += 128;
-		sy += 96;
+		sy += GFX_VIEW_CY;
 
 		sx *= GFX_SCALE;
 		sy *= GFX_SCALE;
@@ -346,7 +346,7 @@ void side_starfield (void)
 		stars[i].x = xx;
 
 		if (warp_stars)
-			gfx_draw_line (sx, sy, (xx + 128) * GFX_SCALE, (yy + 96) * GFX_SCALE);
+			gfx_draw_line (sx, sy, (xx + 128) * GFX_SCALE, (yy + GFX_VIEW_CY) * GFX_SCALE);
 
 		
 		if (abs(stars[i].x) >= 116)

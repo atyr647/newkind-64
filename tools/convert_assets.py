@@ -72,6 +72,9 @@ def main():
     output_path = os.path.join(project_dir, "n64_spritedata.c")
 
     # Allow overriding paths via command line
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        print("usage: convert_assets.py [sprite_dir] [output.c]")
+        return 0
     if len(sys.argv) > 1:
         sprite_dir = sys.argv[1]
     if len(sys.argv) > 2:
@@ -95,6 +98,14 @@ def main():
             )
         sprite_data[idx] = (w, h, pixels)
         print(f"  [{idx:2d}] {filename:20s} {w:4d}x{h:<4d} ({len(pixels)} bytes)")
+
+    # Never overwrite good sprite data with an incomplete set (for example
+    # when the sprite directory argument is wrong).
+    missing = [f for i, f, _, _ in SPRITES if i not in sprite_data]
+    if missing:
+        print(f"ERROR: {len(missing)} sprite file(s) missing from {sprite_dir}; "
+              f"{output_path} left untouched.")
+        return 1
 
     # Generate C source
     out = []
@@ -168,4 +179,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

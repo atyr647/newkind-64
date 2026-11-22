@@ -34,13 +34,19 @@ SRCS = \
 
 OBJS = $(SRCS:%.c=$(BUILD_DIR)/%.o)
 
-CFLAGS += -DPLATFORM_N64 -I. -Wno-error
+# Extra compiler flags, e.g. make -f Makefile.n64 EXTRA_CFLAGS=-DN64_SHOW_FPS
+EXTRA_CFLAGS ?=
+CFLAGS += -DPLATFORM_N64 -I. -Wno-error $(EXTRA_CFLAGS)
 
 # Filesystem assets
 WAV_SRCS = launch.wav crash.wav dock.wav gameover.wav pulse.wav hitem.wav \
            explode.wav ecm.wav missile.wav hyper.wav incom1.wav incom2.wav \
            beep.wav boop.wav
 WAV64_TARGETS = $(WAV_SRCS:%.wav=filesystem/%.wav64)
+
+# Music: the original MIDI tunes pre-rendered to WAV (tools/render_music.sh)
+MUSIC_SRCS = theme.wav danube.wav
+MUSIC64_TARGETS = $(MUSIC_SRCS:%.wav=filesystem/%.wav64)
 
 all: elite_newkind.z64
 
@@ -51,14 +57,20 @@ filesystem/%.wav64: %.wav | filesystem
 	@echo "    [AUDIO] $<"
 	$(N64_AUDIOCONV) --wav-resample 22050 --wav-mono -o $@ $<
 
+$(MUSIC64_TARGETS): filesystem/%.wav64: music/%.wav | filesystem
+	@echo "    [MUSIC] $<"
+	$(N64_AUDIOCONV) --wav-resample 22050 --wav-mono --wav-compress 1 -o $(dir $@) $<
+
 filesystem/newkind.cfg: newkind.cfg | filesystem
 	cp $< $@
 filesystem/newscan.cfg: newscan.cfg | filesystem
 	cp $< $@
 filesystem/scanner.bmp: scanner.bmp | filesystem
 	cp $< $@
+filesystem/iconbar.bmp: iconbar.bmp | filesystem
+	cp $< $@
 
-FILESYSTEM_DEPS = $(WAV64_TARGETS) filesystem/newkind.cfg filesystem/newscan.cfg filesystem/scanner.bmp
+FILESYSTEM_DEPS = $(WAV64_TARGETS) $(MUSIC64_TARGETS) filesystem/newkind.cfg filesystem/newscan.cfg filesystem/scanner.bmp filesystem/iconbar.bmp
 
 $(BUILD_DIR)/elite_newkind.dfs: $(FILESYSTEM_DEPS)
 elite_newkind.z64: $(BUILD_DIR)/elite_newkind.elf $(BUILD_DIR)/elite_newkind.dfs
