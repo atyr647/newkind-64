@@ -54,6 +54,8 @@ struct hw_model
 	const struct ship_mesh *mesh;		/* replacement model, or NULL */
 	sprite_t **sprites;					/* its textures */
 	T3DVertPacked **mesh_verts;			/* its vertices, one buffer per batch */
+	T3DVertPacked **mesh_env_verts;		/* the same with smooth normals */
+	T3DVertPacked *env_verts;			/* plain model: verts with smooth normals */
 	int num_batches;
 	short batch_base[MAX_BATCHES];		/* first vertex of each batch (even) */
 	short batch_verts[MAX_BATCHES];		/* vertices to load (even) */
@@ -76,6 +78,18 @@ static int queued;
 static T3DViewport viewport;
 static int initialised;
 
+/*
+ * Metal reflections. After a ship is drawn, its triangles are drawn again
+ * with an environment texture whose coordinates the RSP works out from each
+ * vertex's normal as seen from the camera (spherical environment mapping).
+ * That pass is blended over the paint where the ship already is, so
+ * highlights slide across the hull as it turns. It uses smooth normals (the
+ * average of the faces meeting at a corner), kept in a second set of
+ * vertex buffers, so a highlight moves across a face rather than lighting
+ * it all at once.
+ */
+static sprite_t *env_sprite;
+
 /* Direction towards the light, in game view space. */
 static struct vector light_dir = { -0.4, 0.6, -0.7 };
 
@@ -91,6 +105,7 @@ void hw_ships_init(void)
 	memset(models, 0, sizeof(models));
 	queued = 0;
 	initialised = (matrices != NULL);
+	env_sprite = sprite_load("rom:/env_metal.sprite");
 #ifdef HW_PREBUILD
 	{ int t; for (t = 1; t <= HW_PREBUILD; t++) build_model(t); }
 #endif
@@ -140,7 +155,8 @@ static void build_mesh_model(struct hw_model *model, const struct ship_mesh *mes
 
 	model->sprites = calloc(mesh->num_charts, sizeof(sprite_t *));
 	model->mesh_verts = calloc(mesh->num_batches, sizeof(T3DVertPacked *));
-	if (!model->sprites || !model->mesh_verts)
+	model->mesh_env_verts = calloc(mesh->num_batches, sizeof(T3DVertPacked *));
+	if (!model->sprites || !model->mesh_verts || !model->mesh_env_verts)
 		return;
 
 	for (i = 0; i < mesh->num_charts; i++)
@@ -155,14 +171,16 @@ static void build_mesh_model(struct hw_model *model, const struct ship_mesh *mes
 		const struct ship_mesh_batch *b = &mesh->batches[i];
 		int pairs = (b->num_verts + 1) / 2;
 		T3DVertPacked *buf = malloc_uncached(sizeof(T3DVertPacked) * pairs);
+		T3DVertPacked *env = malloc_uncached(sizeof(T3DVertPacked) * pairs);
 
-		if (!buf)
+		if (!buf || !env)
 			return;
 		memset(buf, 0, sizeof(T3DVertPacked) * pairs);
+		memset(env, 0, sizeof(T3DVertPacked) * pairs);
 
 		for (k = 0; k < b->num_verts; k++)
 		{
-			const short *v = &b->verts[k * 8];
+			const short *v = &b->verts[k * SHIP_MESH_STRIDE];
 			int16_t *pos = t3d_vertbuffer_get_pos(buf, k);
 			int16_t *uv = t3d_vertbuffer_get_uv(buf, k);
 			T3DVec3 n = {{ v[3] / 127.0f, v[4] / 127.0f, v[5] / 127.0f }};
@@ -174,13 +192,64 @@ static void build_mesh_model(struct hw_model *model, const struct ship_mesh *mes
 			uv[1] = v[7];
 			*t3d_vertbuffer_get_norm(buf, k) = t3d_vert_pack_normal(&n);
 			*t3d_vertbuffer_get_color(buf, k) = 0xFFFFFFFF;
+
+			{
+				T3DVec3 sn = {{ v[8] / 127.0f, v[9] / 127.0f, v[10] / 127.0f }};
+				int16_t *epos = t3d_vertbuffer_get_pos(env, k);
+				epos[0] = v[0];
+				epos[1] = v[1];
+				epos[2] = v[2];
+				*t3d_vertbuffer_get_norm(env, k) = t3d_vert_pack_normal(&sn);
+				*t3d_vertbuffer_get_color(env, k) = 0xFFFFFFFF;
+			}
 		}
 
 		model->mesh_verts[i] = buf;
+		model->mesh_env_verts[i] = env;
 	}
 
 	model->mesh = mesh;
 	model->built = 1;
+}
+
+
+/*
+ * The smooth normal at one corner of a ship: the average of the faces that
+ * meet there, leaving out faces at a sharp angle to this one so hard
+ * creases stay crisp.
+ */
+static T3DVec3 smooth_normal(const struct ship_solid *solid, int point, const T3DVec3 *face_normal)
+{
+	T3DVec3 sn = {{0, 0, 0}};
+	int f, q;
+
+	for (f = 0; f < solid->num_faces; f++)
+	{
+		const struct ship_face *g = &solid->face_data[f];
+		int hit = 0;
+		float gl;
+
+		if (g->points < 3)
+			continue;
+		for (q = 0; q < g->points; q++)
+			if (face_point(g, q) == point)
+				hit = 1;
+		if (!hit)
+			continue;
+		gl = sqrtf(g->norm_x * g->norm_x + g->norm_y * g->norm_y + g->norm_z * g->norm_z);
+		if (gl < 0.001f)
+			continue;
+		if ((g->norm_x * face_normal->v[0] + g->norm_y * face_normal->v[1] + g->norm_z * face_normal->v[2]) / gl < 0.2f)
+			continue;
+		sn.v[0] += g->norm_x / gl;
+		sn.v[1] += g->norm_y / gl;
+		sn.v[2] += g->norm_z / gl;
+	}
+
+	if (sn.v[0] == 0 && sn.v[1] == 0 && sn.v[2] == 0)
+		return *face_normal;
+	t3d_vec3_norm(&sn);
+	return sn;
 }
 
 
@@ -302,9 +371,11 @@ static void build_model(int type)
 
 	total = (total + 1) & ~1;
 	model->verts = malloc_uncached(sizeof(T3DVertPacked) * (total / 2));
-	if (!model->verts)
+	model->env_verts = malloc_uncached(sizeof(T3DVertPacked) * (total / 2));
+	if (!model->verts || !model->env_verts)
 		return;
 	memset(model->verts, 0, sizeof(T3DVertPacked) * (total / 2));
+	memset(model->env_verts, 0, sizeof(T3DVertPacked) * (total / 2));
 
 	{
 		/* Pass 1: fill the vertex buffer, remembering where each face went. */
@@ -383,6 +454,16 @@ static void build_model(int type)
 				pos[1] = p->y + (int)lroundf(normal.v[1] * lift);
 				pos[2] = p->z + (int)lroundf(normal.v[2] * lift);
 				*t3d_vertbuffer_get_norm(model->verts, next) = packed_normal;
+				{
+					T3DVec3 sn = smooth_normal(solid, face_point(face, k), &normal);
+					int16_t *epos = t3d_vertbuffer_get_pos(model->env_verts, next);
+					epos[0] = pos[0];
+					epos[1] = pos[1];
+					epos[2] = pos[2];
+					*t3d_vertbuffer_get_norm(model->env_verts, next) = t3d_vert_pack_normal(&sn);
+					*t3d_vertbuffer_get_color(model->env_verts, next) = 0xFFFFFFFF;
+				}
+
 				*t3d_vertbuffer_get_color(model->verts, next) = rgba;
 
 				next++;
@@ -614,6 +695,7 @@ void hw_ships_flush(void)
 		t3d_matrix_pop(1);
 	}
 
+
 	/* Ships with replacement models: textured, one texture per batch. */
 	{
 		sprite_t *current = NULL;
@@ -654,6 +736,63 @@ void hw_ships_flush(void)
 
 			t3d_matrix_pop(1);
 		}
+	}
+
+	/* Metal reflections over everything drawn above. */
+	if (env_sprite)
+	{
+		rdpq_mode_begin();
+			rdpq_mode_combiner(RDPQ_COMBINER_TEX);
+			rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+			rdpq_mode_zbuf(true, false);
+			rdpq_mode_filter(FILTER_BILINEAR);
+		rdpq_mode_end();
+		rdpq_change_other_modes_raw(SOM_ZMODE_MASK, SOM_ZMODE_DECAL);
+		rdpq_sprite_upload(TILE0, env_sprite, NULL);
+		t3d_state_set_vertex_fx(T3D_VERTEX_FX_SPHERICAL_UV, 32, 32);
+		t3d_state_set_drawflags(T3D_FLAG_DEPTH | T3D_FLAG_TEXTURED);
+
+		for (i = 0; i < queued; i++)
+		{
+			const struct hw_model *model = &models[queue[i].type];
+			int b, t;
+
+			t3d_matrix_push(&matrices[i]);
+
+			if (model->mesh)
+			{
+				for (b = 0; b < model->mesh->num_batches; b++)
+				{
+					const struct ship_mesh_batch *batch = &model->mesh->batches[b];
+
+					t3d_vert_load(model->mesh_env_verts[b], 0, (batch->num_verts + 1) & ~1);
+					for (t = 0; t < batch->num_tris; t++)
+						t3d_tri_draw(batch->tris[t * 3], batch->tris[t * 3 + 1], batch->tris[t * 3 + 2]);
+					t3d_tri_sync();
+				}
+			}
+			else
+			{
+				for (b = 0; b < model->num_batches; b++)
+				{
+					if (model->batch_verts[b] <= 0)
+						continue;
+					t3d_vert_load(&model->env_verts[model->batch_base[b] / 2], 0, model->batch_verts[b]);
+					for (t = model->batch_tri_first[b]; t < model->batch_tri_first[b + 1]; t++)
+						t3d_tri_draw(model->tris[t * 3], model->tris[t * 3 + 1], model->tris[t * 3 + 2]);
+					t3d_tri_sync();
+				}
+			}
+
+			t3d_matrix_pop(1);
+		}
+
+		t3d_state_set_vertex_fx(T3D_VERTEX_FX_NONE, 0, 0);
+		rdpq_change_other_modes_raw(SOM_ZMODE_MASK, SOM_ZMODE_OPAQUE);
+		rdpq_mode_begin();
+			rdpq_mode_blender(0);
+			rdpq_mode_zbuf(true, true);
+		rdpq_mode_end();
 	}
 
 	/* Wait for the RDP, then give the whole screen back to 2D drawing. */

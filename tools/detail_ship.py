@@ -6,10 +6,15 @@ The ship's geometry and face colours are exactly those in shipdata.c and
 shipface.c. Each flat face is given its own texture, painted here in the
 face's original colour. The paintwork is laid out over the whole ship, not
 face by face, so it reads as one design: irregular hull panels, a cockpit
-canopy at the nose, wing stripes and a roundel, hazard markings and scorching
-by the engines, a belly hatch, weathering, and an exhaust glow on engine faces.
+canopy at the nose, hazard markings and scorching by the engines, cargo doors
+on the belly, weathering, and an exhaust glow on engine faces. Every vertex
+also gets a smooth normal for the renderer's metal reflection pass.
 
-  detail_ship.py <ship> [points]
+  detail_ship.py <ship> [points] [marks=canopy,hazard,...]
+
+marks= picks the markings: canopy, stripes, pinstripe, roundel, hazard,
+doors, scorch (default: canopy, hazard, doors, scorch). marks= on its own
+gives plain panelling.
 
 e.g. detail_ship.py cobra3 cobra3a_point. Writes ships/<ship>.mesh.json and
 ships/<ship>_<n>.png; run tools/gen_ship_textures.py afterwards.
@@ -40,6 +45,10 @@ TEXEL_DENSITY = 1.5      # texels per game unit, when the face is small enough
 TILE = 64
 TILE_STEP = TILE - 2     # tiles overlap by a texel each side for filtering
 MAX_TILES = 3            # per face, in each direction
+# Which markings to paint (detail_ship.py <ship> <points> marks=a,b,...).
+ALL_MARKS = {"canopy", "stripes", "pinstripe", "roundel", "hazard", "doors", "scorch"}
+MARKS = {"canopy", "hazard", "doors", "scorch"}
+
 SUPERSAMPLE = 3          # paint at 3x and average down, for clean thin lines
 
 PANEL_W, PANEL_H = 30.0, 20.0   # plating size, in game units
@@ -231,7 +240,7 @@ def paint_face(base_rgb, pu, pv, poly, seed, is_engine, sym_u, world, normal, la
     if top:
         # cockpit canopy: tinted glass across the nose in a dark frame, one
         # centre bar and one cross bar, with a sky reflection and a glint
-        canopy = (zn > 0.58) & (zn < 0.88) & (xn < 0.22) & inner
+        canopy = (zn > 0.58) & (zn < 0.88) & (xn < 0.22) & inner & ("canopy" in MARKS)
         bars = canopy & ((xa < 1.3) | (np.abs(zn - 0.71) < 0.010))
         glass = canopy & ~bars
         depth = np.clip((zn - 0.58) / 0.30, 0, 1)[..., None]
@@ -240,26 +249,30 @@ def paint_face(base_rgb, pu, pv, poly, seed, is_engine, sym_u, world, normal, la
         col[glint] = (205, 230, 245)
         col[bars] = (48, 50, 58)
         shade[canopy] = 1.0
-        rim = (zn > 0.565) & (zn < 0.895) & (xn < 0.235) & inner & ~canopy
+        rim = (zn > 0.565) & (zn < 0.895) & (xn < 0.235) & inner & ~canopy & ("canopy" in MARKS)
         col[rim] = (40, 42, 50)
         shade[rim] = 1.0
 
         # a bold stripe and a thin one following the wing's leading edge
         behind = layout.front(xa) - wz
         outboard = (xn > 0.28) & (xn < 0.93) & inner
-        stripe = outboard & (((behind > 7.0) & (behind < 13.0)) | ((behind > 16.0) & (behind < 18.0)))
+        stripe = np.zeros(pu.shape, bool)
+        if "stripes" in MARKS:
+            stripe |= outboard & (((behind > 7.0) & (behind < 13.0)) | ((behind > 16.0) & (behind < 18.0)))
+        if "pinstripe" in MARKS:
+            stripe |= outboard & (behind > 8.0) & (behind < 10.0)
         col[stripe] = (228, 228, 218)
         shade[stripe] = 1.0
 
         # a roundel on each wing
         r = np.hypot(xa - 0.60 * layout.half_width, wz - (layout.lo[2] + 0.30 * layout.length))
-        ring = inner & (r < 12.5)
+        ring = inner & (r < 12.5) & ("roundel" in MARKS)
         col[ring] = (228, 228, 218)
-        col[inner & (r < 9.5)] = (200, 32, 32)
-        col[inner & (r < 4.0)] = (228, 228, 218)
+        col[ring & (r < 9.5)] = (200, 32, 32)
+        col[ring & (r < 4.0)] = (228, 228, 218)
         shade[ring] = 1.0
 
-    if bottom:
+    if bottom and "doors" in MARKS:
         # cargo bay doors on the belly
         doors = (xn < 0.24) & (zn > 0.30) & (zn < 0.62)
         door_line = doors & ((xn > 0.225) | (xa < 0.9) | (np.abs(zn - 0.30) < 0.012) | (np.abs(zn - 0.62) < 0.012))
@@ -270,14 +283,15 @@ def paint_face(base_rgb, pu, pv, poly, seed, is_engine, sym_u, world, normal, la
 
     if flat:
         # hazard stripes along the stern, and scorching from the engines
-        hazard = (zn < 0.075) & inner & (xn < 0.62)
+        hazard = (zn < 0.075) & inner & (xn < 0.62) & ("hazard" in MARKS)
         yellow = hazard & (np.floor((xa + wz) / 5.0) % 2 == 0)
         col[yellow] = (215, 175, 25)
         col[hazard & ~yellow] = (28, 28, 28)
         shade[hazard] = 1.0
         scorch = np.clip(1.0 - (zn - 0.075) / 0.22, 0, 1) * np.clip(1.0 - np.abs(xn - 0.16) / 0.20, 0, 1)
         streak = 0.75 + 0.25 * np.sin(xa * 1.9 + np.sin(xa * 0.37) * 3.0)
-        shade *= 1.0 - 0.42 * scorch * streak * (zn >= 0.075)
+        if "scorch" in MARKS:
+            shade *= 1.0 - 0.42 * scorch * streak * (zn >= 0.075)
 
     # --- lighting and wear baked into the paint -----------------------------------
     shade *= 0.90 + 0.18 * np.clip(zn, 0, 1)                   # lighter towards the nose
@@ -358,8 +372,16 @@ def clip_polygon(poly, axis, bound, keep_greater):
 
 
 def main():
-    ship = sys.argv[1]
-    point_name = sys.argv[2] if len(sys.argv) > 2 else ship + "_point"
+    global MARKS
+    args = [a for a in sys.argv[1:] if not a.startswith("marks=")]
+    for a in sys.argv[1:]:
+        if a.startswith("marks="):
+            MARKS = {m for m in a[6:].split(",") if m}
+            unknown = MARKS - ALL_MARKS
+            if unknown:
+                sys.exit("unknown markings: %s (choose from %s)" % (", ".join(sorted(unknown)), ", ".join(sorted(ALL_MARKS))))
+    ship = args[0]
+    point_name = args[1] if len(args) > 1 else ship + "_point"
     points, faces = load_ship(ship + "_face", point_name)
     idx, pal = load_palette()
     pts = np.array(points, float)
@@ -400,6 +422,30 @@ def main():
         return n, float(np.mean(p @ n)), area
 
     planes = {i: plane(i) for i, _ in solid}
+
+    # Smooth normals for the metal reflection pass: at each corner of a face,
+    # the average of the faces meeting there (leaving out sharp creases);
+    # anywhere else on the face, a distance-weighted blend of its corners.
+    corner_smooth = {}
+    for i, (_, _, vs) in solid:
+        ni = planes[i][0]
+        cs = []
+        for v in vs:
+            acc = np.zeros(3)
+            for j, (_, _, vj) in solid:
+                if v in vj and planes[j][0] @ ni >= 0.2:
+                    acc += planes[j][0]
+            cs.append(acc / np.linalg.norm(acc) if np.linalg.norm(acc) > 1e-9 else ni)
+        corner_smooth[i] = (pts[vs], np.array(cs))
+
+    def smooth_at(i, p):
+        cp, cs = corner_smooth[i]
+        d = np.linalg.norm(cp - (p - lift.get(i, 0.0)), axis=1)
+        if d.min() < 1e-6:
+            return cs[int(np.argmin(d))]
+        w = 1.0 / d ** 2
+        n = (cs * w[:, None]).sum(axis=0)
+        return n / np.linalg.norm(n)
     lift = {}
     for i, _ in solid:
         ni, di, ai = planes[i]
@@ -502,6 +548,7 @@ def main():
                 tex, ox, oy = tiles[(tu, tv)]
                 for k in range(1, len(cell) - 1):
                     corners = [(p[0], p[1], p[2], nn[0], nn[1], nn[2], uvc[0] - ox, uvc[1] - oy)
+                               + tuple(smooth_at(i, p))
                                for uvc, p in (cell[0], cell[k], cell[k + 1])]
                     tris.append((tex, corners))
 
@@ -511,7 +558,8 @@ def main():
     def pack(c):
         return (int(round(c[0])), int(round(c[1])), int(round(c[2])),
                 int(round(c[3] * 127)), int(round(c[4] * 127)), int(round(c[5] * 127)),
-                int(round(c[6] * 32)), int(round(c[7] * 32)))
+                int(round(c[6] * 32)), int(round(c[7] * 32)),
+                int(round(c[8] * 127)), int(round(c[9] * 127)), int(round(c[10] * 127)))
 
     batches = []
     cur = None

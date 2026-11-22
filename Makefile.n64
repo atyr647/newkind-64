@@ -79,11 +79,16 @@ filesystem/iconbar.bmp: iconbar.bmp | filesystem
 # Ship textures (baked by tools/bake_ship_texture.py): 16-colour sprites.
 SHIP_TEX_SRCS = $(wildcard ships/*.png)
 SHIP_TEX_TARGETS = $(SHIP_TEX_SRCS:ships/%.png=filesystem/%.sprite)
+# Reflection texture for the ships' metal pass (intensity + alpha).
+filesystem/env_metal.sprite: env/env_metal.png | filesystem
+	@echo "    [SPRITE] $<"
+	$(N64_MKSPRITE) --format IA16 -o filesystem $<
+
 filesystem/%.sprite: ships/%.png | filesystem
 	@echo "    [SPRITE] $<"
 	$(N64_MKSPRITE) --format CI4 -o filesystem $<
 
-FILESYSTEM_DEPS = $(WAV64_TARGETS) $(MUSIC64_TARGETS) filesystem/newkind.cfg filesystem/newscan.cfg filesystem/scanner.bmp filesystem/iconbar.bmp $(SHIP_TEX_TARGETS)
+FILESYSTEM_DEPS = $(WAV64_TARGETS) $(MUSIC64_TARGETS) filesystem/newkind.cfg filesystem/newscan.cfg filesystem/scanner.bmp filesystem/iconbar.bmp $(SHIP_TEX_TARGETS) filesystem/env_metal.sprite
 
 $(BUILD_DIR)/elite_newkind.dfs: $(FILESYSTEM_DEPS)
 elite_newkind.z64: $(BUILD_DIR)/elite_newkind.elf $(BUILD_DIR)/elite_newkind.dfs

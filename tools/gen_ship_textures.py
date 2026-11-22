@@ -34,7 +34,7 @@ for path in sorted(glob.glob(os.path.join(ROOT, "ships", "*.mesh.json"))):
         name, ", ".join('"rom:/%s.sprite"' % c["file"] for c in data["charts"])))
     out.append("")
     for i, b in enumerate(data["batches"]):
-        out.append("/* x, y, z, normal (x127), u, v (1/32 texel) */")
+        out.append("/* x, y, z, normal (x127), u, v (1/32 texel), smooth normal (x127) */")
         out.append("static const short %s_v%d[] = {" % (name, i))
         for v in b["verts"]:
             out.append("\t" + ", ".join("%d" % x for x in v) + ",")

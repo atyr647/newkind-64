@@ -90,12 +90,17 @@ tiny3d: the original Elite ship shapes and face colours, lit from the
 system's sun and depth-buffered. Solid and Wireframe are the previous
 software renderers, unchanged.
 
+Every hardware-drawn ship also has metal reflections: a second pass draws
+its triangles again with an environment texture (`env/env_metal.png`, made by
+`tools/make_env_texture.py`) mapped from the surface's direction as seen by the
+camera, blended over the paint, so highlights slide across the hull as it
+turns (the N64's spherical environment mapping, done on the RSP).
+
 Ships listed in `ships/` (so far the Cobra Mk III) also get painted surface
 detail. The geometry and each face's colour are exactly the originals; the
 paintwork on top is laid out over the whole ship: irregular hull panels, a
-cockpit canopy at the nose, wing stripes and a roundel, hazard markings and
-scorching by the engines, cargo doors on the belly, weathering, and an exhaust
-glow on engine faces.
+tinted cockpit canopy at the nose, a hazard band and scorching at the stern,
+cargo doors on the belly, weathering, and an exhaust glow on engine faces.
 
 An **Expansion Pak is required**.
 
@@ -105,7 +110,9 @@ An **Expansion Pak is required**.
     python3 tools/gen_ship_textures.py          # rewrites n64_shiptex.c
 
 `detail_ship.py` reads the ship straight from `shipdata.c` / `shipface.c` and
-writes its textures and layout to `ships/`. Textures are 16-colour tiles of at
+writes its textures and layout to `ships/`. `marks=` chooses the markings
+(canopy, stripes, pinstripe, roundel, hazard, doors, scorch; the default is
+canopy, hazard, doors and scorch). Textures are 16-colour tiles of at
 most 64x64 (what fits the N64's texture memory at once); a large face is
 covered by up to 2x2 tiles so the detail stays sharp, and mirror-image faces
 share textures. List the game ship types that use it in `SHIP_TYPES` in
@@ -120,7 +127,8 @@ original ships and exports their meshes.
   CPU reads the controller and runs the simulation, and fills the banded
   planet as one textured rectangle per screen line.
 * In Enhanced mode ships are transformed and lit by the RSP and drawn by the
-  RDP with a depth buffer (tiny3d). Stars, text and the dashboard are drawn
+  RDP with a depth buffer (tiny3d), then given a second, blended reflection
+  pass with environment-mapped texture coordinates generated on the RSP. Stars, text and the dashboard are drawn
   by the CPU.
 * Sound effects and music are mixed by libdragon's RSP mixer.
 

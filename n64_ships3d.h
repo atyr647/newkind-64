@@ -21,12 +21,15 @@ void hw_ships_flush (void);
  * the RSP's vertex cache, the triangles that use them, and the texture
  * ("chart") they are drawn with.
  */
+#define SHIP_MESH_STRIDE 11
+
 struct ship_mesh_batch
 {
 	short chart;
 	short num_verts;
 	short num_tris;
-	const short *verts;			/* 8 per vertex: x, y, z, nx, ny, nz, u, v */
+	const short *verts;			/* SHIP_MESH_STRIDE per vertex: x, y, z, normal,
+								 * u, v, smooth normal (normals x127) */
 	const unsigned char *tris;	/* 3 per triangle */
 };
 
