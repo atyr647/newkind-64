@@ -897,7 +897,7 @@ void tactics (int un)
 
 void draw_laser_lines (void)
 {
-	if (wireframe)
+	if (wireframe == 1)
 	{
 		gfx_draw_colour_line (32 * GFX_SCALE, GFX_VIEW_BY, laser_x, laser_y, GFX_COL_WHITE);
 		gfx_draw_colour_line (48 * GFX_SCALE, GFX_VIEW_BY, laser_x, laser_y, GFX_COL_WHITE);

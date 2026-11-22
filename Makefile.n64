@@ -3,6 +3,10 @@ SOURCE_DIR = .
 
 include $(N64_INST)/include/n64.mk
 
+# tiny3d (https://github.com/HailToDodongo/tiny3d), built with the same toolchain.
+TINY3D_DIR ?= $(N64_INST)/tiny3d
+include $(TINY3D_DIR)/t3d.mk
+
 N64_ROM_TITLE = "Elite - The New Kind"
 N64_ROM_SAVETYPE = eeprom16k
 N64_ROM_REGIONFREE = true
@@ -15,6 +19,8 @@ SRCS = \
 	n64_file.c \
 	n64_font.c \
 	n64_spritedata.c \
+	n64_ships3d.c \
+	n64_shiptex.c \
 	elite.c \
 	docked.c \
 	intro.c \
@@ -70,7 +76,14 @@ filesystem/scanner.bmp: scanner.bmp | filesystem
 filesystem/iconbar.bmp: iconbar.bmp | filesystem
 	cp $< $@
 
-FILESYSTEM_DEPS = $(WAV64_TARGETS) $(MUSIC64_TARGETS) filesystem/newkind.cfg filesystem/newscan.cfg filesystem/scanner.bmp filesystem/iconbar.bmp
+# Ship textures (baked by tools/bake_ship_texture.py): 16-colour sprites.
+SHIP_TEX_SRCS = $(wildcard ships/*.png)
+SHIP_TEX_TARGETS = $(SHIP_TEX_SRCS:ships/%.png=filesystem/%.sprite)
+filesystem/%.sprite: ships/%.png | filesystem
+	@echo "    [SPRITE] $<"
+	$(N64_MKSPRITE) --format CI4 -o filesystem $<
+
+FILESYSTEM_DEPS = $(WAV64_TARGETS) $(MUSIC64_TARGETS) filesystem/newkind.cfg filesystem/newscan.cfg filesystem/scanner.bmp filesystem/iconbar.bmp $(SHIP_TEX_TARGETS)
 
 $(BUILD_DIR)/elite_newkind.dfs: $(FILESYSTEM_DEPS)
 elite_newkind.z64: $(BUILD_DIR)/elite_newkind.elf $(BUILD_DIR)/elite_newkind.dfs

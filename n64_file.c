@@ -74,7 +74,7 @@ void write_config_file(void)
 	buf[1] = 'K';
 	buf[2] = 'S';
 	buf[3] = 1;		/* layout version */
-	buf[4] = wireframe ? 1 : 0;
+	buf[4] = wireframe;
 	buf[5] = anti_alias_gfx ? 1 : 0;
 	buf[6] = planet_render_style & 3;
 	buf[7] = (hoopy_casinos ? 1 : 0) | (instant_dock ? 2 : 0) | (remap_keys ? 4 : 0);
@@ -93,7 +93,7 @@ static void read_saved_settings(void)
 	if (buf[0] != 'N' || buf[1] != 'K' || buf[2] != 'S' || buf[3] != 1)
 		return;
 
-	wireframe = buf[4] & 1;
+	wireframe = (buf[4] <= 2) ? buf[4] : 2;
 	anti_alias_gfx = buf[5] & 1;
 	planet_render_style = buf[6] & 3;
 	hoopy_casinos = buf[7] & 1;

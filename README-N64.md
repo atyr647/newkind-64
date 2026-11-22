@@ -82,6 +82,29 @@ One commander is kept in the cartridge EEPROM (Save Commander on the Options
 screen or in the pause menu, while docked). Game Settings are kept there too.
 The title screen offers **A: Load Game** when a save exists.
 
+## Enhanced graphics
+
+Game Settings > Graphics has three modes: **Enhanced** (the default), Solid
+and Wireframe. Enhanced draws the ships with the N64's 3D hardware through
+tiny3d: the original Elite ship shapes and face colours, lit from the
+system's sun and depth-buffered. Ships with a texture in `ships/` (so far the
+Cobra Mk III) are textured as well. Solid and Wireframe are the previous
+software renderers, unchanged.
+
+An **Expansion Pak is required**.
+
+### Adding a ship texture
+
+Ship geometry is never replaced. A detailed reference model (for example one
+generated with Tripo) is projected onto the original shape as a 64x64,
+16-colour texture:
+
+    python3 tools/ship_export.py cobra3 render ref.png cobra3a_point   # reference picture
+    python3 tools/bake_ship_texture.py cobra3 reference.glb ships/cobra3 cobra3a_point
+    python3 tools/gen_ship_textures.py                                  # rewrites n64_shiptex.c
+
+then list the ship type in `SHIP_TYPES` in `tools/gen_ship_textures.py`.
+
 ## How the N64 hardware is used
 
 * The space views, title screens and cut-scenes are drawn straight into the
@@ -89,14 +112,18 @@ The title screen offers **A: Load Game** when a save exists.
 * The RDP (graphics chip) wipes the view at the start of each frame while the
   CPU reads the controller and runs the simulation, and fills the banded
   planet as one textured rectangle per screen line.
-* Ships, stars, text and the dashboard are drawn by the CPU.
+* In Enhanced mode ships are transformed and lit by the RSP and drawn by the
+  RDP with a depth buffer (tiny3d). Stars, text and the dashboard are drawn
+  by the CPU.
 * Sound effects and music are mixed by libdragon's RSP mixer.
 
 ## Building
 
-Needs the libdragon toolchain (`N64_INST` set):
+Needs the libdragon toolchain (`N64_INST` set) and tiny3d
+(https://github.com/HailToDodongo/tiny3d) built with it. The Makefile looks
+for tiny3d in `$(N64_INST)/tiny3d`; point `TINY3D_DIR` elsewhere if needed:
 
-    make -f Makefile.n64
+    make -f Makefile.n64 [TINY3D_DIR=/path/to/tiny3d]
 
 Add `EXTRA_CFLAGS=-DN64_SHOW_FPS` for a frames-per-second readout.
 

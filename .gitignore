@@ -1,2 +1,3 @@
 build/
 filesystem/
+__pycache__/

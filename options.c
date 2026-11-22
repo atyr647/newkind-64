@@ -58,7 +58,7 @@ struct setting
 
 static struct setting setting_list[NUM_SETTINGS] =
 {
-	{"Graphics:",		{"Solid", "Wireframe", "", "", ""}},
+	{"Graphics:",		{"Solid", "Wireframe", "Enhanced", "", ""}},
 	{"Anti Alias:",		{"Off", "On", "", "", ""}},		
 	{"Planet Style:",	{"Wireframe", "Green", "SNES", "Fractal", ""}},
 	{"Planet Desc.:",	{"BBC", "MSX", "", "", ""}},
@@ -237,7 +237,11 @@ void toggle_setting (void)
 	switch (hilite_item)
 	{
 		case 0:
+#ifdef PLATFORM_N64
+			wireframe = (wireframe + 1) % 3;
+#else
 			wireframe ^= 1;
+#endif
 			break;
 		
 		case 1:

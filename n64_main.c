@@ -1856,6 +1856,17 @@ int main(void)
 		return 1;
 	}
 
+	/* The depth buffer and model data need the extra memory. */
+	if (!is_memory_expanded())
+	{
+		current_screen = SCR_INTRO_ONE;
+		gfx_clear_display();
+		gfx_display_centre_text(150, "EXPANSION PAK REQUIRED", 140, GFX_COL_GOLD);
+		gfx_display_centre_text(200, "Please switch off and fit an Expansion Pak.", 120, GFX_COL_WHITE);
+		for (;;)
+			gfx_update_screen();
+	}
+
 	/* Start the sound system... */
 	snd_sound_startup();
 

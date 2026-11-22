@@ -20,6 +20,7 @@
 #include "gfx.h"
 #include "elite.h"
 #include "n64_assets.h"
+#include "n64_ships3d.h"
 
 /* The 256-color palette, stored as RGBA5551 for direct write */
 static uint16_t palette_rgba16[256];
@@ -78,6 +79,7 @@ static int direct_frames;        /* consecutive direct frames so far */
  * so the two must never be drawing at once: hw_sync() waits for the RDP
  * to finish before the CPU carries on.
  */
+static surface_t zbuffer;        /* depth buffer for the hardware-drawn ships */
 static int rdp_attached;         /* RDP is attached to cur_surface */
 static int rdp_busy;             /* RDP commands issued since the last sync */
 static int view_precleared;      /* the RDP has already wiped this frame's view */
@@ -89,6 +91,29 @@ static void hw_sync(void)
 		rspq_wait();
 		rdp_busy = 0;
 	}
+}
+
+/* Hooks for the hardware ship renderer (n64_ships3d.c). */
+int gfx_hw_available(void)
+{
+	return direct_mode && rdp_attached;
+}
+
+void gfx_hw_mark_busy(void)
+{
+	rdp_busy = 1;
+}
+
+void gfx_hw_wait(void)
+{
+	hw_sync();
+}
+
+void gfx_palette_rgb(int index, int *r, int *g, int *b)
+{
+	*b = bmp_palette[index & 255][0];
+	*g = bmp_palette[index & 255][1];
+	*r = bmp_palette[index & 255][2];
 }
 
 static void hw_release(void)
@@ -268,6 +293,8 @@ int gfx_graphics_startup(void)
 	/* 640x480 interlaced, 16-bit colour. */
 	display_init(RESOLUTION_640x480, DEPTH_16_BPP, NUM_DISPLAY_BUFFERS, GAMMA_NONE, FILTERS_RESAMPLE);
 	rdpq_init();
+	zbuffer = surface_alloc(FMT_RGBA16, N64_SCREEN_W, N64_SCREEN_H);
+	hw_ships_init();
 
 	/* The dashboard BMP carries the game palette (the original Elite palette
 	 * plus the private NES dashboard colours). */
@@ -437,7 +464,7 @@ void gfx_update_screen(void)
 		 * controller and running the simulation. Each display buffer still
 		 * holds whatever was shown a few frames ago, so the first time one
 		 * is used directly the whole screen is wiped instead. */
-		rdpq_attach(cur_surface, NULL);
+		rdpq_attach(cur_surface, &zbuffer);
 		rdp_attached = 1;
 		rdpq_set_mode_fill(RGBA32(0, 0, 0, 255));
 		if (direct_frames < NUM_DISPLAY_BUFFERS || cur_layout != GFX_LAYOUT_SPACE)
@@ -1242,7 +1269,10 @@ void gfx_finish_render(void)
 	int col;
 
 	if (total_polys == 0)
+	{
+		hw_ships_flush();
 		return;
+	}
 
 	for (i = start_poly; i != -1; i = poly_chain[i].next)
 	{
@@ -1258,6 +1288,8 @@ void gfx_finish_render(void)
 
 		gfx_polygon(num_points, pl, col);
 	};
+
+	hw_ships_flush();
 }
 
 

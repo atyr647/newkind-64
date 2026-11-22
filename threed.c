@@ -18,6 +18,9 @@
 #include <ctype.h>
 
 #include "config.h"
+#ifdef PLATFORM_N64
+#include "n64_ships3d.h"
+#endif
 #include "elite.h"
 #include "gfx.h"
 #include "planet.h"
@@ -1175,7 +1178,13 @@ void draw_ship (struct univ_object *ship)
 		(fabs(ship->location.y) > ship->location.z))
 		return;
 		
-	if (wireframe)
+#ifdef PLATFORM_N64
+	/* Enhanced graphics: lit, depth-buffered ships drawn by the RSP/RDP. */
+	if (wireframe == 2 && hw_ships_queue (ship))
+		return;
+#endif
+
+	if (wireframe == 1)
 		draw_wireframe_ship (ship);
 	else
 		draw_solid_ship (ship);

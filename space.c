@@ -30,6 +30,9 @@
 #endif
 
 #include "config.h"
+#ifdef PLATFORM_N64
+#include "n64_ships3d.h"
+#endif
 #include "elite.h"
 #include "keyboard.h"
 #include "gfx.h"
@@ -641,6 +644,15 @@ void update_universe (void)
 
 			flip = universe[i];
 			switch_to_view (&flip);
+
+#ifdef PLATFORM_N64
+			/* Light the ships from the sun; when the station has taken the
+			 * sun's place, from a fixed direction relative to the planet. */
+			if (type == SHIP_SUN)
+				hw_ships_set_light (flip.location.x, flip.location.y, flip.location.z);
+			else if (type == SHIP_PLANET && universe[1].type != SHIP_SUN)
+				hw_ships_set_light (flip.rotmat[1].x, flip.rotmat[1].y, flip.rotmat[1].z);
+#endif
 
 			if (type == SHIP_PLANET)
 			{
